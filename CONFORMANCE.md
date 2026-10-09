@@ -19,9 +19,9 @@ runner. A passing run is not a claim of full standalone or private-MMO parity.
 `node conformance/backend.mjs` runs 66 scenarios (499 steps). They cover world
 generation and room operations, all 11 cron jobs, bots/respawn/strongholds, and
 the original `game.js`, `power-creeps.js`, `market.js` and `user.js` routes
-that have a game equivalent. Current tree: 477 steps match, 22 steps are named
-expected divergences in 11 scenarios, and there are 0 mismatches and 0 errors
-(`.reference/backend-current-verified.json`). Expected divergences are never
+that have a game equivalent. Current tree: 480 steps match, 19 steps are named
+expected divergences in 10 scenarios, and there are 0 mismatches and 0 errors
+(`.reference/market-owner-after.json`). Expected divergences are never
 counted as matches. Random draws differ between the two sides only in the
 `stronghold-explicit-position` and `bot-username-case-insensitive` steps;
 the run reports this as information only. A passing run does not mean the
@@ -55,6 +55,13 @@ resolution status. Retained divergences remain open separately.
 | Power creeps: name coercion and upgrade check order.                                                                               | `gameplay.power-creeps.lifecycle`, `gameplay.power-creeps.fractional-level`                                                             | [game#10](https://github.com/openscreeps/game/issues/10) |
 | Views: map-stats fields, unknown room overview, market queries without a resourceType, branch active flags, `active` on code save. | `gameplay.map.*`, `gameplay.market.views`, `gameplay.user.*`                                                                            | [game#11](https://github.com/openscreeps/game/issues/11) |
 
+Public market order owner IDs now match the original response
+([game#16](https://github.com/openscreeps/game/issues/16)). The former
+`GP-D8 market-order-owner-privacy` exception masked a public response contract
+defect and has been removed. The 12-step market scenario compares full responses
+without that exception. `activeMarketOrders(world, resourceType?)` no longer takes
+an unused viewer ID; `userMarketOrders(world, userId)` remains ownership-filtered.
+
 The createPlayer default-branch timestamp
 ([game#15](https://github.com/openscreeps/game/issues/15)) is outside the
 66-scenario suite and its totals. It was reproduced by a separate throwaway
@@ -80,7 +87,6 @@ Each divergence is asserted on both sides only for the listed fields and steps.
 | `GP-D2 manual-intent-shape`          | safety         | Original stores intent shapes that crash the processor, or that target another room → local answers `invalid params`.             | `gameplay.intents.malformed` 1-4           | [game#12](https://github.com/openscreeps/game/issues/12) |
 | `GP-D3 invader-coordinates`          | safety         | Original stores x/y unparsed → local stores integers (only `.x`/`.y` are excluded from comparison).                               | `gameplay.invaders.coordinates` 1          | [game#12](https://github.com/openscreeps/game/issues/12) |
 | `GP-D4 power-level-integer`          | safety         | Original stores a fractional power level → local rejects it.                                                                      | `gameplay.power-creeps.fractional-level` 3 | [game#12](https://github.com/openscreeps/game/issues/12) |
-| `GP-D8 market-order-owner-privacy`   | safety         | Original exposes other players' user ids on orders → local hides them.                                                            | `gameplay.market.views` 2, 3, 5            | [game#12](https://github.com/openscreeps/game/issues/12) |
 | `GP-D5 power-experimentation-delete` | upstream-crash | Original throws a TypeError (`db.remove`) and keeps the creep → local deletes it.                                                 | `gameplay.power-creeps.lifecycle` 43       | [game#13](https://github.com/openscreeps/game/issues/13) |
 | `GP-D6 map-stats-rankings`           | upstream-todo  | Original returns empty stats → local returns rankings from recorded statistics.                                                   | `gameplay.map.stats` 2                     | [game#13](https://github.com/openscreeps/game/issues/13) |
 | `GP-D7 room-overview-stats`          | upstream-todo  | Original returns empty stats/totals → local returns recorded ones (same owner on both sides).                                     | `gameplay.map.room-overview` 1-3           | [game#13](https://github.com/openscreeps/game/issues/13) |

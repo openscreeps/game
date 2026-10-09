@@ -12,11 +12,10 @@ export interface MarketOrderIndexEntry {
 }
 
 /**
- * Player view of a stored order: price converted from the stored thousandths of a credit,
- * processing scratch fields (`_skip`, `_cancelled`) dropped, and the owner hidden on other
- * players' orders.
+ * HTTP-facing order: price converted from stored thousandths of a credit, processing scratch
+ * fields dropped, and public owner IDs retained as in the pinned backend.
  */
-function orderView(order: MarketOrder, viewerId: string): Record<string, unknown> {
+function orderView(order: MarketOrder): Record<string, unknown> {
   const view: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(order)) {
     if (key === '_id' || !key.startsWith('_')) {
@@ -24,9 +23,6 @@ function orderView(order: MarketOrder, viewerId: string): Record<string, unknown
     }
   }
   view['price'] = order.price / 1000;
-  if (order.user !== viewerId) {
-    delete view['user'];
-  }
   return view;
 }
 
@@ -60,7 +56,6 @@ export function marketOrderIndex(world: WorldState): MarketOrderIndexEntry[] {
  */
 export function activeMarketOrders(
   world: WorldState,
-  viewerId: string,
   resourceType?: string,
 ): Array<Record<string, unknown>> {
   return Object.values(world.marketOrders)
@@ -68,7 +63,7 @@ export function activeMarketOrders(
       (order) =>
         order.active && (resourceType === undefined || order.resourceType === resourceType),
     )
-    .map((order) => orderView(order, viewerId));
+    .map(orderView);
 }
 
 /** Every order (active or not) the user owns. */
@@ -78,7 +73,7 @@ export function userMarketOrders(
 ): Array<Record<string, unknown>> {
   return Object.values(world.marketOrders)
     .filter((order) => order.user === userId)
-    .map((order) => orderView(order, userId));
+    .map(orderView);
 }
 
 /** Daily market statistics of one resource (every resource without one), newest first. */

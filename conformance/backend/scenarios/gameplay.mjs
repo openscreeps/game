@@ -484,41 +484,6 @@ const MARKET_ORDERS = [
   },
 ];
 
-/** JSON with sorted keys (results are compared in this canonical form). */
-function sortedJson(value) {
-  return JSON.stringify(value, (key, item) =>
-    item && typeof item === 'object' && !Array.isArray(item)
-      ? Object.fromEntries(
-          Object.keys(item)
-            .sort()
-            .map((name) => [name, item[name]]),
-        )
-      : item,
-  );
-}
-
-/** Both lists must be exactly the fixture orders `ids`; only the owner field may differ. */
-function marketPrivacy(ids) {
-  const listed = (hideOthers) =>
-    sortedJson(
-      MARKET_ORDERS.filter((order) => ids.includes(order._id)).map(({ user: owner, ...order }) => ({
-        ...order,
-        price: order.price / 1000,
-        ...(owner !== undefined && (!hideOthers || owner === EMMA) ? { user: owner } : {}),
-      })),
-    );
-  return divergence(
-    'GP-D8 market-order-owner-privacy',
-    'safety',
-    "backend market.js:37-42 returns every active order with its owner's `user` id; the local game hides the owner of other players' orders (other-player privacy, as on the official server) and keeps it on the viewer's own orders.",
-    {
-      coversResult: true,
-      upstream: (view, result) => sortedJson(result.ok?.list) === listed(false),
-      local: (view, result) => sortedJson(result.ok?.list) === listed(true),
-    },
-  );
-}
-
 /* ---------------------------------------------------------------- scenarios */
 
 const flagsAt = (count, room) =>
@@ -1729,18 +1694,12 @@ export default [
         local: (l, g) => ({ list: g.marketOrderIndex(l.state.world) }),
         result: apiBody((data) => ({ list: data.list })),
       }),
-      ...[
-        ['energy', ['o00000000000001', 'o00000000000002']],
-        ['H', ['o00000000000004', 'o00000000000005']],
-        ['O', []],
-        [undefined, ['o00000000000001', 'o00000000000002', 'o00000000000004', 'o00000000000005']],
-      ].map(([resourceType, ids]) =>
+      ...['energy', 'H', 'O', undefined].map((resourceType) =>
         market('get', '/orders', {
           user: EMMA,
           query: resourceType === undefined ? {} : { resourceType },
-          local: (l, g) => ({ list: g.activeMarketOrders(l.state.world, EMMA, resourceType) }),
+          local: (l, g) => ({ list: g.activeMarketOrders(l.state.world, resourceType) }),
           result: apiBody((data) => ({ list: data.list.map(doc) })),
-          expected: ids.some((id) => id !== 'o00000000000001') ? [marketPrivacy(ids)] : undefined,
         }),
       ),
       ...[EMMA, MICHAEL, ALICE].map((userId) =>

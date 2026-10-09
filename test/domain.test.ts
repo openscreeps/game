@@ -168,9 +168,9 @@ void describe('gameplay operations', () => {
       totalAmount: 10,
       roomName: 'W1N1',
     };
-    const [order] = activeMarketOrders(world, 'alice', 'energy');
+    const [order] = activeMarketOrders(world, 'energy');
     assert.equal(order?.['price'], 1.5);
-    assert.equal('user' in order, false);
+    assert.equal(order['user'], 'bob');
   });
 });
 
