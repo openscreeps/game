@@ -1,11 +1,6 @@
 import { constants as C, type WorldState } from '@openscreeps/engine';
 import { GameError, newId, type GameState } from '../contracts.ts';
-import {
-  checkGameRoom,
-  isFlagColor,
-  isRoomCoordinate,
-  type GameOperationContext,
-} from './support.ts';
+import { checkGameRoom, isFlagColor, type GameOperationContext } from './support.ts';
 
 type FlagDoc = WorldState['flags'][string];
 
@@ -45,21 +40,30 @@ function parseFlags(data: string): FlagEntry[] {
   });
 }
 
-/** All flags of a user grouped by room (upstream `getFlags(user)`). */
+/**
+ * All flags of a user by room (upstream `getFlags(user)`: one entry per room document, a later
+ * document of the same room replacing an earlier one).
+ */
 export function userFlags(world: WorldState, userId: string): Map<string, FlagEntry[]> {
   const rooms = new Map<string, FlagEntry[]>();
   for (const doc of Object.values(world.flags)) {
     if (doc.user === userId) {
-      rooms.set(doc.room, [...(rooms.get(doc.room) ?? []), ...parseFlags(doc.data)]);
+      rooms.set(doc.room, parseFlags(doc.data));
     }
   }
   return rooms;
 }
 
+/** Flags of a user in one room (upstream `getFlags(user, room)`: the first matching document). */
+function roomFlags(world: WorldState, userId: string, room: string): FlagEntry[] {
+  const doc = Object.values(world.flags).find((item) => item.user === userId && item.room === room);
+  return doc ? parseFlags(doc.data) : [];
+}
+
 /**
- * Upstream `setFlags`: one document per user and room, serialized with the separator escapes the
- * engine and runtime parse. A room without flags drops its document, because the processor parses
- * an empty `data` string as one nameless flag.
+ * Upstream `setFlags`: `update({user, room}, {$set: {data}}, {upsert: true})`. Every document of
+ * the user and room gets the serialized flags (with the separator escapes the engine and runtime
+ * parse); without one a document is inserted, also for an empty room (`data: ''`).
  */
 function saveRoomFlags(
   state: GameState,
@@ -67,33 +71,28 @@ function saveRoomFlags(
   room: string,
   flags: readonly FlagEntry[],
 ): void {
-  const docs: FlagDoc[] = Object.values(state.world.flags).filter(
-    (doc) => doc.user === userId && doc.room === room,
-  );
-  for (const duplicate of docs.slice(1)) {
-    Reflect.deleteProperty(state.world.flags, duplicate._id);
-  }
-  const doc = docs[0];
-  if (!flags.length) {
-    if (doc) {
-      Reflect.deleteProperty(state.world.flags, doc._id);
-    }
-    return;
-  }
   const data = flags
     .map(([name = '', ...rest]) =>
       [name.replace(/\|/g, '$VLINE$').replace(/~/g, '$TILDE$'), ...rest].join('~'),
     )
     .join('|');
-  if (doc) {
+  const docs: FlagDoc[] = Object.values(state.world.flags).filter(
+    (doc) => doc.user === userId && doc.room === room,
+  );
+  for (const doc of docs) {
     doc.data = data;
-    return;
   }
-  const _id = newId(state);
-  state.world.flags[_id] = { _id, user: userId, room, data };
+  if (!docs.length) {
+    const _id = newId(state);
+    state.world.flags[_id] = { _id, user: userId, room, data };
+  }
 }
 
-/** Upstream `/create-flag`: creates a flag, or moves the user's flag of the same name. */
+/**
+ * Upstream `/create-flag`: creates a flag, or moves the user's flag of the same name. The old flag
+ * is removed (and saved) before the flag limit is checked, so a refused move still drops it.
+ * Coordinates are any numbers within 0..49 (upstream `_.isNumber`), stored as given.
+ */
 export function createFlag(
   game: GameOperationContext,
   userId: string,
@@ -102,10 +101,13 @@ export function createFlag(
   const { state } = game;
   const { x, y, name, color, secondaryColor } = input;
   if (
-    !isRoomCoordinate(x) ||
-    !isRoomCoordinate(y) ||
+    typeof x !== 'number' ||
+    x < 0 ||
+    x > 49 ||
+    typeof y !== 'number' ||
+    y < 0 ||
+    y > 49 ||
     name === undefined ||
-    !name.length ||
     name.length > 60 ||
     !isFlagColor(color) ||
     !isFlagColor(secondaryColor)
@@ -113,19 +115,22 @@ export function createFlag(
     throw new GameError('invalid params');
   }
   const room = checkGameRoom(state.world, input.room, game.now());
-  const flags = userFlags(state.world, userId);
-  const previousRoom = [...flags].find(([, list]) => list.some((flag) => flag[0] === name))?.[0];
-  let count = 0;
-  for (const [flagRoom, list] of flags) {
-    const kept = flagRoom === previousRoom ? list.filter((flag) => flag[0] !== name) : list;
-    flags.set(flagRoom, kept);
-    count += kept.length;
+  const previous = [...userFlags(state.world, userId)].find(([, list]) =>
+    list.some((flag) => flag[0] === name),
+  );
+  if (previous) {
+    const [previousRoom, list] = previous;
+    saveRoomFlags(
+      state,
+      userId,
+      previousRoom,
+      list.filter((flag) => flag[0] !== name),
+    );
   }
+  const flags = userFlags(state.world, userId);
+  const count = [...flags.values()].reduce((sum, list) => sum + list.length, 0);
   if (count >= C.FLAGS_LIMIT) {
     throw new GameError('flags limit exceeded');
-  }
-  if (previousRoom !== undefined && previousRoom !== room) {
-    saveRoomFlags(state, userId, previousRoom, flags.get(previousRoom) ?? []);
   }
   const flag: FlagEntry = [name, String(color), String(secondaryColor), String(x), String(y)];
   saveRoomFlags(state, userId, room, [...(flags.get(room) ?? []), flag]);
@@ -150,32 +155,45 @@ export function checkUniqueFlagName(world: WorldState, userId: string, name?: st
   }
 }
 
+/**
+ * Upstream `/change-flag-color`: recolors the named flag of the room and saves the room's flags
+ * (creating an empty room document when there is none). Without a room nothing is saved.
+ */
 export function changeFlagColor(
   state: GameState,
   userId: string,
   input: ChangeFlagColorInput,
 ): void {
   const { room, name, color, secondaryColor } = input;
-  if (!isFlagColor(color) || !isFlagColor(secondaryColor) || room === undefined) {
+  if (!isFlagColor(color) || !isFlagColor(secondaryColor)) {
     throw new GameError('invalid params');
   }
-  const flags = userFlags(state.world, userId).get(room) ?? [];
+  if (!room) {
+    return;
+  }
+  const flags = roomFlags(state.world, userId, room);
   const flag = flags.find((item) => item[0] === name);
   if (flag) {
     flag[1] = String(color);
     flag[2] = String(secondaryColor);
-    saveRoomFlags(state, userId, room, flags);
   }
+  saveRoomFlags(state, userId, room, flags);
 }
 
+/**
+ * Upstream `/remove-flag`: saves the room's flags without the named one (creating an empty room
+ * document when there is none). Without a room nothing is saved.
+ */
 export function removeFlag(state: GameState, userId: string, input: RemoveFlagInput): void {
   const { room, name } = input;
-  if (room === undefined) {
-    throw new GameError('invalid params');
+  if (!room) {
+    return;
   }
-  const flags = userFlags(state.world, userId).get(room) ?? [];
-  const kept = flags.filter((flag) => flag[0] !== name);
-  if (kept.length !== flags.length) {
-    saveRoomFlags(state, userId, room, kept);
-  }
+  const flags = roomFlags(state.world, userId, room);
+  saveRoomFlags(
+    state,
+    userId,
+    room,
+    flags.filter((flag) => flag[0] !== name),
+  );
 }

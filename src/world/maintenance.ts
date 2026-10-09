@@ -7,19 +7,19 @@
  * account data (e-mail, notification preferences) is only reachable through `MaintenanceHooks`.
  */
 
-import { constants as C, type WorldState } from '@openscreeps/engine';
+import { constants as C, recordRoomObjectWrites, type WorldState } from '@openscreeps/engine';
 import type { GameState } from '../contracts.ts';
 import { WorldRandom } from './random.ts';
 import {
   activateRoom,
   insertObject,
   isCenter,
-  isSectorCenterName,
   isWallAt,
   nextId,
   roomNameFromXY,
   roomNameToXY,
   roomObjectsOf,
+  storageIndexOrder,
 } from './rooms.ts';
 import { expandStrongholds, genStrongholds } from './strongholds.ts';
 
@@ -100,17 +100,18 @@ function sendNotifications(state: GameState, now: number, run: MaintenanceRun): 
       list.push(notification._id);
     }
   }
-  for (const [userId, ids] of byUser) {
+  // upstream loads the users of due notifications (`users.find({_id: {$in}})`, storage order);
+  // notifications of users that no longer exist stay untouched
+  for (const { _id: userId } of Object.values(world.users)) {
+    const ids = byUser.get(userId);
+    if (!ids) {
+      continue;
+    }
     const remove = (): void => {
       for (const id of ids) {
         Reflect.deleteProperty(world.notifications, id);
       }
     };
-    if (!world.users[userId]) {
-      // notifications of deleted users can never be delivered
-      remove();
-      continue;
-    }
     const recipient = run.hooks.notificationRecipient?.(userId);
     const prefs = recipient?.preferences;
     const email = recipient?.email;
@@ -168,28 +169,22 @@ function roomsForceUpdate(state: GameState): void {
 // ---------------------------------------------------------------------------------------------
 // genPowerBanks / genDeposits
 
-/** Random wall tile in 5..44 next to an open tile (upstream power bank/deposit spot search). */
-function findWallSpot(
-  random: WorldRandom,
-  terrain: string,
-  accept: (x: number, y: number) => boolean,
-): { x: number; y: number } | undefined {
-  for (let cnt = 0; cnt < 1000; cnt++) {
-    const x = random.index(40) + 5;
-    const y = random.index(40) + 5;
-    let hasExit = false;
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dy = -1; dy <= 1; dy++) {
-        if (!isWallAt(terrain, x + dx, y + dy)) {
-          hasExit = true;
-        }
+/**
+ * One draw of the upstream power bank/deposit spot search: a random tile in 5..44 and whether it is
+ * a wall with an open tile in its 3x3 square.
+ */
+function drawWallSpot(random: WorldRandom, terrain: string): { x: number; y: number; ok: boolean } {
+  const x = random.index(40) + 5;
+  const y = random.index(40) + 5;
+  let hasExit = false;
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      if (!isWallAt(terrain, x + dx, y + dy)) {
+        hasExit = true;
       }
     }
-    if (isWallAt(terrain, x, y) && hasExit && accept(x, y)) {
-      return { x, y };
-    }
   }
-  return undefined;
+  return { x, y, ok: isWallAt(terrain, x, y) && hasExit };
 }
 
 function genPowerBanks(state: GameState): void {
@@ -215,13 +210,13 @@ function genPowerBanks(state: GameState): void {
     if (terrain === undefined) {
       continue;
     }
-    const objects = roomObjectsOf(world, room._id);
-    const spot = findWallSpot(
-      random,
-      terrain,
-      (x, y) => !objects.some((o) => o.x === x && o.y === y),
-    );
-    if (!spot) {
+    // upstream draws until it finds a spot (other objects are not checked) and never gives up; the
+    // cap only guards against a room without any wall next to an open tile
+    let spot: { x: number; y: number; ok: boolean } | undefined;
+    for (let tries = 0; tries < 100000 && !spot?.ok; tries++) {
+      spot = drawWallSpot(random, terrain);
+    }
+    if (!spot?.ok) {
       continue;
     }
     let power = Math.floor(
@@ -264,13 +259,20 @@ function getSectorEdges(centralRoomName: string): string[] | undefined {
   return [...roomNames];
 }
 
+/**
+ * Upstream `genDeposits`, quirks included: the center filter is the string `'^[WE]\d*5[NS]\d*5$'`,
+ * in which `\d` collapses to a literal `d`, so only single-digit centers such as `W5N5` qualify;
+ * candidate rooms come in storage order; the spot search ignores its own `inSector` result and
+ * gives up on the 1000th draw; a center without free rooms or terrain ends the whole job.
+ */
 function genDeposits(state: GameState): void {
   const world = state.world;
   const random = new WorldRandom(world);
   const gameTime = world.gameTime;
   const centralRooms = Object.values(world.rooms).filter(
-    (room) => isSectorCenterName(room._id) && room.status !== 'out of borders',
+    (room) => /^[WE]d*5[NS]d*5$/.test(room._id) && room.status !== 'out of borders',
   );
+  // fetched once: deposits created by this run do not count for later centers
   const deposits = Object.values(world.roomObjects).filter((o) => o.type === 'deposit');
 
   for (const center of centralRooms) {
@@ -279,13 +281,11 @@ function genDeposits(state: GameState): void {
     const cxx = 24 + 50 * cx;
     const cyy = 24 + 50 * cy;
     // half of the sector size (250 tiles) around the center of the central room
-    const inSector = (roomName: string, x: number, y: number): boolean => {
-      const [xx, yy] = roomNameToXY(roomName);
-      return Math.abs(50 * xx + x - cxx) < 250 && Math.abs(50 * yy + y - cyy) < 250;
-    };
-    const sectorDeposits = deposits.filter(
-      (d) => sectorEdges.includes(d.room) && inSector(d.room, d.x, d.y),
-    );
+    const sectorDeposits = deposits.filter((d) => {
+      if (!sectorEdges.includes(d.room)) return false;
+      const [xx, yy] = roomNameToXY(d.room);
+      return Math.abs(50 * xx + d.x - cxx) < 250 && Math.abs(50 * yy + d.y - cyy) < 250;
+    });
     const throughput = sectorDeposits.reduce(
       (sum, deposit) =>
         sum +
@@ -299,40 +299,51 @@ function genDeposits(state: GameState): void {
     if (throughput >= 2.5) {
       continue;
     }
-    const rooms = sectorEdges
-      .map((name) => world.rooms[name])
-      .filter((room) => room?.bus && room.status === 'normal' && room.depositType !== undefined);
-    const busyRooms = new Set(sectorDeposits.map((d) => d.room));
-    const room = random.sample(rooms.filter((r) => r && !busyRooms.has(r._id)));
-    if (!room?.depositType) {
-      continue;
+    const rooms = Object.values(world.rooms).filter(
+      (room) =>
+        sectorEdges.includes(room._id) &&
+        room.bus === true &&
+        room.status === 'normal' &&
+        room.depositType !== undefined,
+    );
+    if (!rooms.length) {
+      throw new Error(`No normal bus rooms found for the sector of ${center._id}`);
+    }
+    const busyRooms = sectorDeposits.map((d) => d.room);
+    const room = random.sample(rooms.filter((r) => !busyRooms.includes(r._id)));
+    if (!room) {
+      return;
     }
     const terrain = world.terrain[room._id];
     if (terrain === undefined) {
-      continue;
+      return;
     }
     const objects = roomObjectsOf(world, room._id);
-    const spot = findWallSpot(
-      random,
-      terrain,
-      (x, y) =>
-        inSector(room._id, x, y) &&
-        !objects.some((o) => Math.abs(o.x - x) <= 2 && Math.abs(o.y - y) <= 2),
-    );
-    if (!spot) {
+    let spot: { x: number; y: number; ok: boolean };
+    let cnt = 0;
+    do {
+      cnt++;
+      spot = drawWallSpot(random, terrain);
+      const { x, y } = spot;
+      if (objects.some((o) => Math.abs(o.x - x) <= 2 && Math.abs(o.y - y) <= 2)) {
+        spot.ok = false;
+      }
+    } while (!spot.ok && cnt < 1000);
+    if (cnt >= 1000) {
       continue;
     }
-    const deposit = insertObject(world, {
-      type: 'deposit',
-      depositType: room.depositType,
-      x: spot.x,
-      y: spot.y,
-      room: room._id,
-      harvested: 0,
-      decayTime: C.DEPOSIT_DECAY_TIME + gameTime,
-    });
-    deposits.push(deposit);
-    activateRoom(world, room._id);
+    if (room.depositType) {
+      insertObject(world, {
+        type: 'deposit',
+        depositType: room.depositType,
+        x: spot.x,
+        y: spot.y,
+        room: room._id,
+        harvested: 0,
+        decayTime: C.DEPOSIT_DECAY_TIME + gameTime,
+      });
+      activateRoom(world, room._id);
+    }
   }
 }
 
@@ -576,9 +587,12 @@ function genInvaders(state: GameState): void {
       invaderGoal *= Math.floor(random.next() > 0.5 ? 2 : 0.5);
     }
     room.invaderGoal = invaderGoal;
+    // upstream `update({room, type: 'source'})`: one write per source in storage find order
+    const sourceIds = storageIndexOrder(world, sources);
     for (const source of sources) {
       source.invaderHarvested = 0;
     }
+    recordRoomObjectWrites(world, sourceIds);
     activateRoom(world, room._id);
   }
 }
@@ -654,9 +668,13 @@ function recreateNpcOrders(state: GameState, now: number): void {
   const world = state.world;
   const random = new WorldRandom(world);
   const gameTime = world.gameTime;
-  const terminals = Object.values(world.roomObjects).filter(
-    (o) => o.type === 'terminal' && (o.user === null || o.user === undefined),
-  );
+  // upstream queries `{user: {$eq: null}}`, which the storage evaluates as `$or` of `null` and
+  // `undefined` owners and concatenates: terminals with an explicit `null` owner come first
+  const all = Object.values(world.roomObjects).filter((o) => o.type === 'terminal');
+  const terminals = [
+    ...all.filter((o) => o.user === null),
+    ...all.filter((o) => o.user === undefined),
+  ];
   for (const terminal of terminals) {
     const room = world.rooms[terminal.room];
     if (room?.status !== 'normal') {

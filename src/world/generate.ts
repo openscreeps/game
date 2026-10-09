@@ -5,6 +5,7 @@
  */
 
 import { constants as C, createWorldState, type WorldState } from '@openscreeps/engine';
+import type { GameState } from '../contracts.ts';
 import { seedState, WorldRandom } from './random.ts';
 import {
   activateRoom,
@@ -39,8 +40,13 @@ export interface GenerateRoomOptions {
   mineral?: string | false;
   /** Whether the room gets a controller; default true. */
   controller?: boolean;
-  /** Source keeper lairs next to every source (and the mineral); default false. */
+  /** Source keeper lairs next to every source; default false. */
   keeperLairs?: boolean;
+  /**
+   * Also guard the mineral with a keeper lair (official source keeper rooms; not an upstream
+   * `generateRoom` option, used by `createWorld`); default false.
+   */
+  mineralKeeperLair?: boolean;
   /** Neutral extractor on the mineral (center and source keeper rooms); default false. */
   extractor?: boolean;
   /** Highway room flag (power banks, deposits); default false. */
@@ -295,12 +301,12 @@ function lairSpots(grid: Grid, x: number, y: number): number[] {
         }
         const distance = (visited.get(c) as number) + 1;
         visited.set(n, distance);
+        // upstream keeps lair candidates on other lairs (the later lair then shares the tile)
         if (
           distance >= 3 &&
           distance <= 5 &&
           grid.wall[n] &&
           !grid.source[n] &&
-          !grid.keeperLair[n] &&
           nx > 0 &&
           nx < 49 &&
           ny > 0 &&
@@ -389,12 +395,8 @@ function genTerrainOnce(
       if (attempts > 1000) {
         throw new RetryTerrain();
       }
-    } while (
-      !grid.wall[y * 50 + x] ||
-      grid.source[y * 50 + x] ||
-      grid.keeperLair[y * 50 + x] ||
-      !hasOpenNeighbor(grid.wall, x, y)
-    );
+      // upstream may pick a tile that already holds a source (both flags then share the tile)
+    } while (!grid.wall[y * 50 + x] || !hasOpenNeighbor(grid.wall, x, y));
     grid.source[y * 50 + x] = 1;
 
     if (keeperLair) {
@@ -459,7 +461,11 @@ interface MineralSpot {
   lair?: number;
 }
 
-/** Upstream mineral placement: a wall with an open neighbor, at least 5 tiles from sources/controller. */
+/**
+ * Upstream mineral placement: a wall with an open neighbor, at least 5 tiles from sources and the
+ * controller (other objects such as keeper lairs may share the tile, as upstream). Upstream loops
+ * forever when no tile qualifies; here the caller regenerates the terrain instead.
+ */
 function placeMineral(
   random: WorldRandom,
   grid: Grid,
@@ -474,10 +480,9 @@ function placeMineral(
     if (
       objects.some(
         (o) =>
-          ((o.type === 'source' || o.type === 'controller') &&
-            Math.abs(o.x - mx) < 5 &&
-            Math.abs(o.y - my) < 5) ||
-          (o.x === mx && o.y === my),
+          (o.type === 'source' || o.type === 'controller') &&
+          Math.abs(o.x - mx) < 5 &&
+          Math.abs(o.y - my) < 5,
       )
     ) {
       continue;
@@ -495,8 +500,9 @@ function placeMineral(
 
 /**
  * Generate a new room (upstream `map.generateRoom`). Throws on an invalid name, an existing room
- * or exits that do not match existing neighbors. Writes `rooms`, `terrain` and room objects and
- * schedules the room for processing; the server must refresh terrain afterwards.
+ * or exits that do not match existing neighbors. Writes `rooms`, `terrain` and room objects
+ * without scheduling the room (upstream leaves that to `roomsForceUpdate`); the server must refresh
+ * terrain afterwards.
  */
 export function generateRoom(
   world: WorldState,
@@ -570,14 +576,18 @@ export function generateRoom(
       for (let x = 0; x < 50; x++) {
         const i = y * 50 + x;
         if (grid.source[i]) {
-          roomObjects.push({
+          // upstream also stores the legacy `ticksToRegeneration` (the engine only reads
+          // `nextRegenerationTime`; the engine document type does not declare the legacy field)
+          const source: Omit<RoomObject, '_id'> & { ticksToRegeneration: number } = {
             room: roomName,
             type: 'source',
             x,
             y,
             energy: C.SOURCE_ENERGY_NEUTRAL_CAPACITY,
             energyCapacity: C.SOURCE_ENERGY_NEUTRAL_CAPACITY,
-          });
+            ticksToRegeneration: C.ENERGY_REGEN_TIME,
+          };
+          roomObjects.push(source);
         }
         if (grid.controller[i]) {
           roomObjects.push({ room: roomName, type: 'controller', x, y, level: 0 });
@@ -596,7 +606,7 @@ export function generateRoom(
       placed = undefined;
       break;
     }
-    placed = placeMineral(random, grid, roomObjects, keeperLairs);
+    placed = placeMineral(random, grid, roomObjects, options.mineralKeeperLair ?? false);
     if (placed) {
       break;
     }
@@ -658,42 +668,45 @@ export function generateRoom(
   for (const object of roomObjects) {
     insertObject(world, object);
   }
-  activateRoom(world, roomName);
 }
 
-/** Upstream `map.openRoom`: make a room available, optionally only from a future timestamp. */
+/**
+ * Upstream `map.openRoom`: make a room available, optionally only from a future timestamp. Like
+ * upstream (a plain `rooms.update`), a missing room is a no-op and nothing is scheduled.
+ */
 export function openRoom(world: WorldState, roomName: string, timestamp?: number): void {
   const room = world.rooms[roomName];
   if (!room) {
-    throw new Error(`The room ${roomName} is not found`);
+    return;
   }
   room.status = 'normal';
   if (timestamp) {
     room.openTime = timestamp;
   }
-  activateRoom(world, roomName);
 }
 
-/** Upstream `map.closeRoom`: a `normal` room becomes `out of borders`. */
+/** Upstream `map.closeRoom`: a `normal` room becomes `out of borders` (a missing room is a no-op). */
 export function closeRoom(world: WorldState, roomName: string): void {
   const room = world.rooms[roomName];
-  if (!room) {
-    throw new Error(`The room ${roomName} is not found`);
-  }
-  if (room.status === 'normal') {
+  if (room?.status === 'normal') {
     room.status = 'out of borders';
   }
 }
 
-/** Upstream `map.removeRoom`: delete the room with all its objects, flags and terrain. */
-export function removeRoom(world: WorldState, roomName: string): void {
+/**
+ * Upstream `map.removeRoom`: delete the room with its objects, flags, terrain and map view, and —
+ * when given the whole game state — its pending manual intents (`rooms.intents`). Like upstream,
+ * users' room lists, the active rooms set and the room event log are left untouched.
+ */
+export function removeRoom(target: WorldState | GameState, roomName: string): void {
+  const state = 'world' in target ? target : undefined;
+  const world = 'world' in target ? target.world : target;
   if (!world.rooms[roomName]) {
     throw new Error(`The room ${roomName} is not found`);
   }
   Reflect.deleteProperty(world.rooms, roomName);
   Reflect.deleteProperty(world.terrain, roomName);
   Reflect.deleteProperty(world.mapViews, roomName);
-  Reflect.deleteProperty(world.roomEventLogs, roomName);
   for (const [id, object] of Object.entries(world.roomObjects)) {
     if (object.room === roomName) {
       Reflect.deleteProperty(world.roomObjects, id);
@@ -704,12 +717,11 @@ export function removeRoom(world: WorldState, roomName: string): void {
       Reflect.deleteProperty(world.flags, id);
     }
   }
-  for (const user of Object.values(world.users)) {
-    if (user.rooms?.includes(roomName)) {
-      user.rooms = user.rooms.filter((name) => name !== roomName);
-    }
+  if (state && Object.hasOwn(state.pendingIntents, roomName)) {
+    state.pendingIntents = Object.fromEntries(
+      Object.entries(state.pendingIntents).filter(([room]) => room !== roomName),
+    );
   }
-  world.activeRooms = world.activeRooms.filter((name) => name !== roomName);
 }
 
 /** Free tile with a free square of `distance` around it (upstream `utils.findFreePos`). */
@@ -898,7 +910,13 @@ function sectorOptions(x: number, y: number, depositType: string | undefined): G
     return { controller: false, sources: 3, keeperLairs: false, extractor: true };
   }
   if (isCenter(x, y)) {
-    return { controller: false, sources: 3, keeperLairs: true, extractor: true };
+    return {
+      controller: false,
+      sources: 3,
+      keeperLairs: true,
+      mineralKeeperLair: true,
+      extractor: true,
+    };
   }
   return {};
 }

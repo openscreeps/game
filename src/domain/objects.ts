@@ -1,9 +1,10 @@
+import { recordRoomObjectWrite } from '@openscreeps/engine';
 import { GameError, type GameState } from '../contracts.ts';
-import { CONSTRUCTION_COST, ownValue, roomController } from './support.ts';
+import { ownValue, roomController } from './support.ts';
 
 /**
- * Upstream `/set-notify-when-attacked` for a structure or creep the user owns (or, for unowned
- * structures, whose room controller the user owns).
+ * Upstream `/set-notify-when-attacked` for any room object the user owns (or, for unowned objects,
+ * whose room controller the user owns). Upstream throws a `TypeError` for an unknown id.
  */
 export function setNotifyWhenAttacked(
   state: GameState,
@@ -12,14 +13,7 @@ export function setNotifyWhenAttacked(
 ): void {
   const { world } = state;
   const object = ownValue(world.roomObjects, input.id);
-  if (
-    !object ||
-    !(
-      Object.hasOwn(CONSTRUCTION_COST, object.type) ||
-      object.type === 'creep' ||
-      object.type === 'powerCreep'
-    )
-  ) {
+  if (!object) {
     throw new GameError('invalid object');
   }
   if (object.user) {
@@ -30,4 +24,5 @@ export function setNotifyWhenAttacked(
     throw new GameError('not controller owner');
   }
   object.notifyWhenAttacked = input.enabled;
+  recordRoomObjectWrite(world, object._id);
 }

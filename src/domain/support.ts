@@ -34,11 +34,15 @@ export function gameUser(world: WorldState, userId: string): User {
 
 /**
  * Upstream `checkGame`: the room must exist on this shard, be a world room (`W..`/`E..`) and be
- * inside the borders and already open.
+ * inside the borders and already open. Without a room name upstream's `findOne({_id: undefined})`
+ * matches any room document, so the name then fails the world room test as `not supported`.
  */
 export function checkGameRoom(world: WorldState, room: string | undefined, now: number): string {
+  if (room === undefined) {
+    throw new GameError(Object.keys(world.rooms).length ? 'not supported' : 'invalid room');
+  }
   const info = ownValue(world.rooms, room);
-  if (room === undefined || !info) {
+  if (!info) {
     throw new GameError('invalid room');
   }
   if (!/^(W|E)/.test(room)) {

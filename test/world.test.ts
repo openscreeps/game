@@ -107,11 +107,20 @@ void describe('world generation', () => {
       assert.equal(base.rooms[name]?.sourceKeepers, true, name);
       assert.equal(objectsIn(base, name, 'controller').length, 0, name);
       assert.equal(objectsIn(base, name, 'source').length, 3, name);
-      assert.equal(objectsIn(base, name, 'keeperLair').length, 4, name);
       const [mineral] = objectsIn(base, name, 'mineral');
       const [extractor] = objectsIn(base, name, 'extractor');
       assert.ok(mineral && extractor);
       assert.deepEqual([extractor.x, extractor.y], [mineral.x, mineral.y]);
+      const lairs = objectsIn(base, name, 'keeperLair');
+      // Source lairs can share a tile; bootstrap worlds also protect their mineral.
+      for (const resource of [...objectsIn(base, name, 'source'), mineral]) {
+        assert.ok(
+          lairs.some(
+            (lair) => Math.max(Math.abs(lair.x - resource.x), Math.abs(lair.y - resource.y)) <= 5,
+          ),
+          `${name}: ${resource.type} has a nearby keeper lair`,
+        );
+      }
     }
     for (const name of ['W2N2', 'W8N3', 'W3N8']) {
       assert.equal(objectsIn(base, name, 'controller').length, 1, name);
@@ -234,7 +243,8 @@ void describe('world generation', () => {
     });
     assert.equal(objectsIn(world, 'E3S3', 'source').length, 2);
     assert.equal(objectsIn(world, 'E3S3', 'mineral')[0]?.mineralType, 'X');
-    assert.ok(world.activeRooms.includes('E3S3'));
+    // like upstream, a generated room waits for `roomsForceUpdate` to be scheduled
+    assert.ok(!world.activeRooms.includes('E3S3'));
 
     removeRoom(world, 'E3S3');
     assert.equal(world.rooms.E3S3, undefined);

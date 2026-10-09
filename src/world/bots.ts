@@ -6,13 +6,25 @@
 
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { constants as C, type CodeModules, type WorldState } from '@openscreeps/engine';
+import {
+  constants as C,
+  recordRoomObjectWrite,
+  recordRoomObjectWrites,
+  type CodeModules,
+  type WorldState,
+} from '@openscreeps/engine';
 import { replaceBranches } from '../code.ts';
-import type { Badge, GameContext, GameState } from '../contracts.ts';
-import { createPlayer, findUserByUsername, removePlayer } from '../players.ts';
+import { newId, type Badge, type GameContext, type GameState, type User } from '../contracts.ts';
+import { findUserByUsername } from '../players.ts';
 import { ensureSystemUser } from './generate.ts';
 import { WorldRandom } from './random.ts';
-import { activateRoom, insertObject, isWallAt, nextId } from './rooms.ts';
+import {
+  activateRoom,
+  insertObject,
+  isWallAt,
+  storageIndexOrder,
+  type RoomObject,
+} from './rooms.ts';
 
 const BOY_NAMES = [
   'Jackson',
@@ -238,6 +250,10 @@ export function loadBotModules(directory: string): CodeModules {
   return modules;
 }
 
+/**
+ * Upstream `genRandomUserName`. Names are checked case-insensitively (upstream: exact match), so a
+ * generated bot can never share a lower-case name with another player.
+ */
 function genRandomUserName(state: GameState, random: WorldRandom): string {
   for (let c = 0; ; c++) {
     const list = random.next() > 0.5 ? BOY_NAMES : GIRL_NAMES;
@@ -264,20 +280,22 @@ function genRandomBadge(random: WorldRandom): Badge {
 }
 
 export interface SpawnBotOptions {
-  /** Bot player name; default randomly generated `<Name>Bot`. */
+  /** Bot player name; default (also for `''`) randomly generated `<Name>Bot`. */
   username?: string;
-  /** CPU limit; default 100. */
+  /** CPU limit; default (also for `0`) 100. */
   cpu?: number;
   /** Global Control Level; default 1. */
   gcl?: number;
-  /** Spawn position; default random non-wall tile. */
+  /** Spawn position (0..49); default (also for `0`) a random non-wall tile in 3..48. */
   x?: number;
   y?: number;
 }
 
 /**
  * Upstream `bots.spawn`: create an NPC player running `modules` and give it a spawn and the
- * controller of an unowned room. Lock-held; returns the new user id and name.
+ * controller of an unowned room. Draws the name, the badge and then the spawn position like
+ * upstream. Usernames are unique case-insensitively (upstream compares them exactly), the only
+ * deliberate difference. Lock-held; returns the new user id and name.
  */
 export function spawnBot(
   context: GameContext,
@@ -302,39 +320,57 @@ export function spawnBot(
   if (terrain === undefined) {
     throw new Error(`Room terrain not found in ${roomName}`);
   }
-  if (options.username !== undefined && findUserByUsername(state, options.username)) {
-    throw new Error(`User with the name "${options.username}" already exists`);
-  }
-  const occupied = (x: number, y: number): boolean =>
-    isWallAt(terrain, x, y) ||
-    Object.values(world.roomObjects).some((o) => o.room === roomName && o.x === x && o.y === y);
   for (const coord of [options.x, options.y]) {
-    if (coord !== undefined && (!Number.isInteger(coord) || coord < 1 || coord > 48)) {
+    if (coord !== undefined && (!Number.isInteger(coord) || coord < 0 || coord > 49)) {
       throw new Error(`Invalid spawn position ${String(coord)}`);
     }
   }
-  // upstream: the requested coordinates first, then random tiles in 3..48 until one is free
-  let x = options.x ?? Math.floor(3 + random.next() * 46);
-  let y = options.y ?? Math.floor(3 + random.next() * 46);
-  for (let tries = 0; occupied(x, y); tries++) {
-    if (tries > 10000) {
-      throw new Error(`No free spawn position in ${roomName}`);
+  let username: string;
+  if (options.username) {
+    if (findUserByUsername(state, options.username)) {
+      throw new Error(`User with the name "${options.username}" already exists`);
     }
-    x = Math.floor(3 + random.next() * 46);
-    y = Math.floor(3 + random.next() * 46);
+    username = options.username;
+  } else {
+    username = genRandomUserName(state, random);
   }
-
-  const username = options.username ?? genRandomUserName(state, random);
-  const user = createPlayer(context, {
+  // upstream bot user document (no money/rooms; registration date is host account data)
+  const user: User = {
+    _id: newId(state),
     username,
+    usernameLower: username.toLowerCase(),
     cpu: options.cpu || 100,
     gcl: options.gcl ? C.GCL_MULTIPLY * Math.pow(options.gcl - 1, C.GCL_POW) : 0,
     cpuAvailable: 0,
     bot: botAiName,
     active: 10000,
     badge: genRandomBadge(random),
-    modules,
-  });
+  };
+  world.users[user._id] = user;
+  const code = structuredClone(modules);
+  if (code.main === undefined) code.main = '';
+  const branchId = newId(state);
+  state.branches[branchId] = {
+    _id: branchId,
+    user: user._id,
+    branch: 'default',
+    modules: code,
+    activeWorld: true,
+    activeSim: true,
+  };
+  context.runtime.setCode(user._id, code, 'default');
+  context.runtime.setMemory(user._id, '{}');
+
+  // upstream: the requested coordinates (0 counts as unset), re-drawn in 3..48 while on a wall
+  let x = options.x || Math.floor(3 + random.next() * 46);
+  let y = options.y || Math.floor(3 + random.next() * 46);
+  for (let tries = 0; isWallAt(terrain, x, y); tries++) {
+    if (tries > 100000) {
+      throw new Error(`No free spawn position in ${roomName}`);
+    }
+    x = Math.floor(3 + random.next() * 46);
+    y = Math.floor(3 + random.next() * 46);
+  }
   insertObject(world, {
     type: 'spawn',
     room: roomName,
@@ -354,7 +390,7 @@ export function spawnBot(
   controller.progress = 0;
   controller.downgradeTime = null;
   controller.safeMode = world.gameTime + 20000;
-  user.rooms = [roomName];
+  recordRoomObjectWrite(world, controller._id);
   const room = world.rooms[roomName];
   if (room) {
     room.invaderGoal = 1000000;
@@ -379,30 +415,45 @@ export function reloadBot(context: GameContext, botAiName: string, modules: Code
 }
 
 /**
- * Upstream `bots.removeUser`: respawn a bot player and delete it with its code and memory
- * (`removePlayer`). Returns the removed user id so hosts can drop their account records.
+ * Upstream `bots.removeUser`: respawn a bot player (exact username match), then delete its user
+ * document, code branches and runtime data (memory). Like upstream, its notifications, market
+ * orders and history are kept. Returns the removed user id so hosts can drop their account records.
  */
 export function removeBot(context: GameContext, username: string): string {
-  const user = findUserByUsername(context.state, username);
+  const { state } = context;
+  const user = Object.values(state.world.users).find(
+    (candidate) => candidate.username === username,
+  );
   if (!user) {
     throw new Error('User not found');
   }
   if (!user.bot) {
     throw new Error('User is not a bot');
   }
-  removePlayer(context, user._id);
+  respawnUser(state, user._id);
+  Reflect.deleteProperty(state.world.users, user._id);
+  for (const [id, branch] of Object.entries(state.branches)) {
+    if (branch.user === user._id) {
+      Reflect.deleteProperty(state.branches, id);
+    }
+  }
+  context.runtime.removeUser(user._id);
   return user._id;
 }
 
 /**
  * Upstream `utils.respawnUser`: remove the player's creeps, power creeps and construction sites,
- * turn its structures into ruins of the system user, release its controllers and flags.
+ * turn its structures into ruins of the system user, hand its older ruins to the system user (their
+ * `structure.user` is kept, as upstream), release its controllers and flags. Nothing is scheduled.
+ *
+ * Deliberate difference: upstream also reopens EVERY room (`rooms.update({_id: undefined})` from an
+ * un-awaited query, sent as `{}` by the storage RPC); here only the player's controller rooms are
+ * set back to `normal`, so closed rooms and other players' rooms are not touched.
  */
 export function respawnUser(state: GameState, userId: string): void {
   const world = state.world;
   const systemUserId = ensureSystemUser(world);
   const gameTime = world.gameTime;
-  const touchedRooms = new Set<string>();
   const structureTypes = new Set<string>(Object.keys(C.CONSTRUCTION_COST));
 
   for (const [id, creep] of Object.entries(world.userPowerCreeps)) {
@@ -411,39 +462,39 @@ export function respawnUser(state: GameState, userId: string): void {
     }
   }
   const owned = Object.values(world.roomObjects).filter((o) => o.user === userId);
-  for (const object of owned) {
-    touchedRooms.add(object.room);
-    if (object.type === 'controller') {
-      continue;
-    }
-    if (object.type === 'ruin') {
-      object.user = systemUserId;
-      if (object.structure) {
-        object.structure.user = systemUserId;
-      }
-      continue;
-    }
-    Reflect.deleteProperty(world.roomObjects, object._id);
-    if (structureTypes.has(object.type)) {
-      const ruin = {
-        type: 'ruin',
+  // ruins of the player's structures, inserted in the order the storage returns the structures
+  const structureIds = storageIndexOrder(
+    world,
+    owned.filter((o) => structureTypes.has(o.type)),
+  );
+  for (const object of structureIds.map((id) => world.roomObjects[id] as RoomObject)) {
+    insertObject(world, {
+      type: 'ruin',
+      user: systemUserId,
+      room: object.room,
+      x: object.x,
+      y: object.y,
+      structure: {
+        id: object._id,
+        type: object.type,
+        hits: 0,
+        hitsMax: object.hitsMax,
         user: systemUserId,
-        room: object.room,
-        x: object.x,
-        y: object.y,
-        structure: {
-          id: object._id,
-          type: object.type,
-          hits: 0,
-          hitsMax: object.hitsMax,
-          user: systemUserId,
-        },
-        store: object.store ?? {},
-        destroyTime: gameTime,
-        decayTime: gameTime + 500000,
-      };
-      const id = nextId(world, world.roomObjects);
-      world.roomObjects[id] = { ...ruin, _id: id };
+      },
+      store: object.store ?? {},
+      destroyTime: gameTime,
+      decayTime: gameTime + 500000,
+    });
+  }
+  const oldRuins = owned.filter((o) => o.type === 'ruin');
+  const oldRuinIds = storageIndexOrder(world, oldRuins);
+  for (const ruin of oldRuins) {
+    ruin.user = systemUserId;
+  }
+  recordRoomObjectWrites(world, oldRuinIds);
+  for (const object of owned) {
+    if (object.type !== 'controller' && object.type !== 'ruin') {
+      Reflect.deleteProperty(world.roomObjects, object._id);
     }
   }
   for (const [id, flag] of Object.entries(world.flags)) {
@@ -451,7 +502,9 @@ export function respawnUser(state: GameState, userId: string): void {
       Reflect.deleteProperty(world.flags, id);
     }
   }
-  for (const controller of owned.filter((o) => o.type === 'controller')) {
+  const controllers = owned.filter((o) => o.type === 'controller');
+  const controllerIds = storageIndexOrder(world, controllers);
+  for (const controller of controllers) {
     const room = world.rooms[controller.room];
     if (room) {
       room.status = 'normal';
@@ -470,12 +523,10 @@ export function respawnUser(state: GameState, userId: string): void {
       isPowerEnabled: false,
     });
   }
+  recordRoomObjectWrites(world, controllerIds);
   const user = world.users[userId];
   if (user) {
     user.rooms = [];
-  }
-  for (const room of touchedRooms) {
-    activateRoom(world, room);
   }
 }
 

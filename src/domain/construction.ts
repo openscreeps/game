@@ -35,8 +35,10 @@ const SPOT_BLOCKERS: Readonly<Record<string, true>> = {
 };
 
 /**
- * Upstream `checkConstructionSpot`, combined with the engine's `checkConstructionSite` so that a
- * site inserted directly is one the processor could also have created.
+ * Upstream `checkConstructionSpot`: inside the room edge, an extractor only on a mineral (whatever
+ * else is there), anything else not on a structure of its own type, a construction site or a
+ * blocking structure (ramparts excepted), not on a wall (roads excepted), not next to an exit and,
+ * on the tiles next to the room edge, only beside edge walls (roads and containers excepted).
  */
 export function checkConstructionSpot(
   world: WorldState,
@@ -51,10 +53,7 @@ export function checkConstructionSpot(
   const objects = roomObjectsOf(world, room);
   const here = objects.filter((object) => object.x === x && object.y === y);
   if (structureType === 'extractor') {
-    if (
-      !here.some((object) => object.type === 'mineral') ||
-      here.some((object) => object.type === 'extractor' || object.type === 'constructionSite')
-    ) {
+    if (!here.some((object) => object.type === 'mineral')) {
       throw new GameError('invalid location');
     }
     return;
@@ -63,14 +62,7 @@ export function checkConstructionSpot(
   const blocked =
     here.some((object) => object.type === structureType || object.type === 'constructionSite') ||
     (structureType !== 'rampart' &&
-      here.some(
-        (object) =>
-          Object.hasOwn(SPOT_BLOCKERS, object.type) ||
-          (structureType !== 'road' &&
-            object.type !== 'rampart' &&
-            object.type !== 'road' &&
-            Object.hasOwn(CONSTRUCTION_COST, object.type)),
-      )) ||
+      here.some((object) => Object.hasOwn(SPOT_BLOCKERS, object.type))) ||
     (structureType !== 'road' && hasTerrain(terrain, x, y, C.TERRAIN_MASK_WALL)) ||
     objects.some(
       (object) =>

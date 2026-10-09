@@ -1,6 +1,6 @@
-import { constants as C, type WorldState } from '@openscreeps/engine';
+import { constants as C, recordRoomObjectWrites, type WorldState } from '@openscreeps/engine';
 import { GameError, newId, type RoomObject } from '../contracts.ts';
-import { activateRoom, roomObjectsOf } from '../world/rooms.ts';
+import { activateRoom, roomObjectsOf, storageIndexOrder } from '../world/rooms.ts';
 import { checkConstructionSpot } from './construction.ts';
 import {
   checkGameRoom,
@@ -46,9 +46,9 @@ function checkSpawnController(world: WorldState, room: string, userId: string): 
 
 /**
  * Upstream `/place-spawn`: a user without objects starts playing. Other players' creeps and
- * construction sites in the room are removed, their structures become ruins, the controller is
- * claimed at level 1 with safe mode, the sources reset their invader counters and the first spawn
- * is inserted.
+ * construction sites in the room are removed, their structures become ruins, a level 0 controller
+ * is claimed at level 1 with safe mode, the sources reset their invader counters and the first
+ * spawn is inserted (unnamed when no name is given).
  */
 export function placeSpawn(
   game: GameOperationContext,
@@ -58,13 +58,7 @@ export function placeSpawn(
   const { state } = game;
   const { world } = state;
   const { x, y, name } = input;
-  if (
-    !isRoomCoordinate(x) ||
-    !isRoomCoordinate(y) ||
-    name === undefined ||
-    !name.length ||
-    name.length > 50
-  ) {
+  if (!isRoomCoordinate(x) || !isRoomCoordinate(y) || (name !== undefined && name.length > 50)) {
     throw new GameError('invalid params');
   }
   const user = gameUser(world, userId);
@@ -86,58 +80,64 @@ export function placeSpawn(
   checkConstructionSpot(world, room, 'spawn', x, y);
 
   const gameTime = world.gameTime;
-  for (const object of roomObjectsOf(world, room)) {
-    if (!object.user) {
-      continue;
-    }
+  const owned = roomObjectsOf(world, room).filter((object) => object.user);
+  for (const object of owned) {
     if (object.type === 'creep' || object.type === 'constructionSite') {
       Reflect.deleteProperty(world.roomObjects, object._id);
-      continue;
     }
-    if (Object.hasOwn(CONSTRUCTION_COST, object.type)) {
-      const ruinId = newId(state);
-      world.roomObjects[ruinId] = {
-        _id: ruinId,
-        type: 'ruin',
+  }
+  // ruins are inserted in the order the storage returns the structures (room index)
+  const structures = owned.filter((object) => Object.hasOwn(CONSTRUCTION_COST, object.type));
+  for (const id of storageIndexOrder(world, structures)) {
+    const object = world.roomObjects[id] as RoomObject;
+    const ruinId = newId(state);
+    world.roomObjects[ruinId] = {
+      _id: ruinId,
+      type: 'ruin',
+      user: object.user,
+      room,
+      x: object.x,
+      y: object.y,
+      structure: {
+        id: object._id,
+        type: object.type,
+        hits: 0,
+        hitsMax: object.hitsMax,
         user: object.user,
-        room,
-        x: object.x,
-        y: object.y,
-        structure: {
-          id: object._id,
-          type: object.type,
-          hits: 0,
-          hitsMax: object.hitsMax,
-          user: object.user,
-        },
-        store: { ...object.store },
-        destroyTime: gameTime,
-        decayTime: gameTime + PLACE_SPAWN_RUIN_DECAY,
-      };
-      Reflect.deleteProperty(world.roomObjects, object._id);
-    }
+      },
+      store: { ...object.store },
+      destroyTime: gameTime,
+      decayTime: gameTime + PLACE_SPAWN_RUIN_DECAY,
+    };
   }
-  for (const object of roomObjectsOf(world, room)) {
-    if (object.type === 'controller' && !object.level) {
-      Object.assign(object, {
-        user: userId,
-        level: 1,
-        progress: 0,
-        downgradeTime: null,
-        safeMode: gameTime + PLACE_SPAWN_SAFE_MODE,
-      });
-    }
-    if (object.type === 'source') {
-      object.invaderHarvested = 0;
-    }
+  for (const object of structures) {
+    Reflect.deleteProperty(world.roomObjects, object._id);
   }
+  const objects = roomObjectsOf(world, room);
+  const controllers = objects.filter((o) => o.type === 'controller' && o.level === 0);
+  const controllerIds = storageIndexOrder(world, controllers);
+  for (const object of controllers) {
+    Object.assign(object, {
+      user: userId,
+      level: 1,
+      progress: 0,
+      downgradeTime: null,
+      safeMode: gameTime + PLACE_SPAWN_SAFE_MODE,
+    });
+  }
+  recordRoomObjectWrites(world, controllerIds);
+  const sources = objects.filter((o) => o.type === 'source');
+  const sourceIds = storageIndexOrder(world, sources);
+  for (const object of sources) {
+    object.invaderHarvested = 0;
+  }
+  recordRoomObjectWrites(world, sourceIds);
   const spawn: RoomObject = {
     _id: newId(state),
     type: 'spawn',
     room,
     x,
     y,
-    name,
     user: userId,
     store: { energy: C.SPAWN_ENERGY_START },
     storeCapacityResource: { energy: C.SPAWN_ENERGY_CAPACITY },
@@ -146,6 +146,9 @@ export function placeSpawn(
     spawning: null,
     notifyWhenAttacked: true,
   };
+  if (name !== undefined) {
+    spawn.name = name;
+  }
   world.roomObjects[spawn._id] = spawn;
   const info = world.rooms[room];
   if (info) {

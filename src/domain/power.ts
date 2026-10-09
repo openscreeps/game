@@ -1,4 +1,4 @@
-import { constants as C, type WorldState } from '@openscreeps/engine';
+import { constants as C, recordRoomObjectWrite, type WorldState } from '@openscreeps/engine';
 import { GameError, newId, type GameState, type User } from '../contracts.ts';
 import { gameUser, ownValue, type GameOperationContext } from './support.ts';
 
@@ -10,7 +10,8 @@ export type SpawnedPowerCreep = Omit<PowerCreepDoc, keyof WorldState['roomObject
 
 export interface CreatePowerCreepInput {
   className?: string | undefined;
-  name?: string | undefined;
+  /** Any request value; stored as upstream `("" + name).substring(0, 50)`. */
+  name?: unknown;
 }
 
 export interface UpgradePowerCreepInput {
@@ -21,7 +22,8 @@ export interface UpgradePowerCreepInput {
 
 export interface RenamePowerCreepInput {
   id?: string | undefined;
-  name?: string | undefined;
+  /** Any request value; stored as upstream `("" + name).substring(0, 50)`. */
+  name?: unknown;
 }
 
 const POWER_INFO: Readonly<
@@ -50,14 +52,6 @@ function ownPowerCreep(world: WorldState, userId: string, id: string | undefined
     throw new GameError('invalid id');
   }
   return creep;
-}
-
-/** Power creep names: upstream `("" + name).substring(0, 50)`, restricted to non-empty strings. */
-function readName(value: string | undefined): string {
-  if (value === undefined || !value.length) {
-    throw new GameError('invalid name');
-  }
-  return value.substring(0, 50);
 }
 
 function isSpawned(creep: PowerCreepDoc): boolean {
@@ -95,7 +89,11 @@ function powersAreValid(powers: Readonly<Record<string, number>>): boolean {
   return true;
 }
 
-/** Validates an upgrade request exactly like upstream `/upgrade`, returning the new power levels. */
+/**
+ * Validates an upgrade request like upstream `/upgrade`, returning the new power levels. Unlike
+ * upstream (`_.isNumber`), a level must also be a whole number: the processors index power effects
+ * by level, so a fractional level would give the creep undefined effects on other players' objects.
+ */
 function readUpgrade(
   creep: PowerCreepDoc,
   input: Readonly<Record<string, unknown>> | undefined,
@@ -112,7 +110,7 @@ function readUpgrade(
     if (info.className !== creep.className) {
       throw new GameError(`invalid class for power ${power}`);
     }
-    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    if (typeof value !== 'number') {
       throw new GameError(`invalid value for power ${power}`);
     }
     if (value < (ownValue(creep.powers, power)?.level ?? 0)) {
@@ -120,6 +118,9 @@ function readUpgrade(
     }
     if (value > MAX_POWER_LEVEL) {
       throw new GameError(`invalid max value for power ${power}`);
+    }
+    if (!Number.isInteger(value)) {
+      throw new GameError(`invalid value for power ${power}`);
     }
     powers[power] = value;
   }
@@ -189,7 +190,7 @@ export function createPowerCreep(
   if (className === undefined || !POWER_CLASSES.includes(className)) {
     throw new GameError('invalid class');
   }
-  const name = readName(input.name);
+  const name = String(input.name).substring(0, 50);
   if (creeps.some((creep) => creep.name === name)) {
     throw new GameError('name already exists');
   }
@@ -270,6 +271,7 @@ export function upgradePowerCreep(
       hitsMax,
       storeCapacity,
     });
+    recordRoomObjectWrite(world, object._id);
   }
 }
 
@@ -283,7 +285,7 @@ export function renamePowerCreep(
   if (isSpawned(creep)) {
     throw new GameError('spawned');
   }
-  const name = readName(input.name);
+  const name = String(input.name).substring(0, 50);
   if (userPowerCreeps(world, userId).some((other) => other.name === name)) {
     throw new GameError('name already exists');
   }

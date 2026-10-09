@@ -95,11 +95,37 @@ export function nextId(world: WorldState, collection: Readonly<Record<string, un
   }
 }
 
-/** Insert a room object (without `_id`) and return the stored document. */
+/**
+ * Insert a room object (without `_id`) and return the stored document. Inserts need no write
+ * record: objects never recorded count as the newest writes, in key (= insertion) order, at the
+ * next `recordRoomObjectWrites` call or tick. Record updates of existing objects at the point of the
+ * write so later inserts stay newer.
+ */
 export function insertObject(world: WorldState, object: Omit<RoomObject, '_id'>): RoomObject {
   const doc = { ...object, _id: nextId(world, world.roomObjects) };
   world.roomObjects[doc._id] = doc;
   return doc;
+}
+
+/**
+ * Ids of `objects` in the order the pinned storage returns them for a query led by its indexed
+ * `room` or `user` field (most recently written first), which is the order an upstream
+ * multi-document `update` writes them. Objects never recorded count as written after all recorded
+ * ones, in key order. Read-only; pass the result to `recordRoomObjectWrites` after the update.
+ */
+export function storageIndexOrder(world: WorldState, objects: readonly RoomObject[]): string[] {
+  const seqs = world.roomObjectWriteSeq ?? {};
+  let unrecorded: Map<string, number> | undefined;
+  const rank = (object: RoomObject): number => {
+    const seq = seqs[object._id];
+    if (seq !== undefined) return seq;
+    unrecorded ??= new Map(Object.keys(world.roomObjects).map((id, index) => [id, index]));
+    return Number.MAX_SAFE_INTEGER / 2 + (unrecorded.get(object._id) ?? 0);
+  };
+  return objects
+    .map((object) => ({ id: object._id, rank: rank(object) }))
+    .sort((a, b) => b.rank - a.rank)
+    .map((entry) => entry.id);
 }
 
 /** Driver accessible rooms rule: status `normal` and already open. */

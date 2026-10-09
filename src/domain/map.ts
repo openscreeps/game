@@ -98,8 +98,9 @@ export function terrainTiles(room: string, terrain: string): TerrainTile[] {
 }
 
 /**
- * Upstream `/map-stats`: per requested room its status, ownership, sign, safe mode, power and
- * mineral, plus the requested room stat ranked by player over its interval.
+ * Upstream `/map-stats`: per requested room its status, ownership, sign, safe mode and mineral,
+ * plus the requested room stat ranked by player over its interval (upstream parses the stat name
+ * but never fills it: `statsMax` stays `{}`).
  */
 export function mapStats(state: GameState, now: number, input: MapStatsInput): MapStats {
   const { world, statistics } = state;
@@ -137,19 +138,17 @@ export function mapStats(state: GameState, now: number, input: MapStatsInput): M
         entry['sign'] = object.sign;
         userIds.add(object.sign.user);
       }
-      if (object.hardSign) {
-        entry['hardSign'] = object.hardSign;
-      }
       if ((object.safeMode ?? 0) > gameTime) {
         entry['safeMode'] = true;
       }
-      if (object.isPowerEnabled) {
-        entry['isPowerEnabled'] = true;
-      }
     }
-    if (object.type === 'invaderCore' && (object.level ?? 0) > 0 && object.user) {
-      entry['own'] = { user: object.user, level: object.level };
-      userIds.add(object.user);
+    if (object.type === 'invaderCore' && (object.level ?? 0) > 0) {
+      entry['own'] = object.user
+        ? { user: object.user, level: object.level }
+        : { level: object.level };
+      if (object.user) {
+        userIds.add(object.user);
+      }
     }
     if (object.type === 'mineral') {
       entry['minerals0'] = { type: object.mineralType, density: object.density };
@@ -181,7 +180,8 @@ export function mapStats(state: GameState, now: number, input: MapStatsInput): M
 
 /**
  * Upstream `/room-overview`: the room's controller owner and its stat graphs over an interval in
- * minutes (8, 180 or 1440; anything else falls back to 8).
+ * minutes (8, 180 or 1440; anything else falls back to 8). Upstream only has the owner (its stats
+ * are a `TODO`); an unknown room has no owner and empty graphs.
  */
 export function roomOverview(
   state: GameState,
@@ -190,7 +190,7 @@ export function roomOverview(
 ): RoomOverview {
   const { world, statistics } = state;
   const { room } = input;
-  if (room === undefined || !Object.hasOwn(world.rooms, room)) {
+  if (room === undefined) {
     throw new GameError('invalid room');
   }
   const window =

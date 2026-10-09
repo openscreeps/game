@@ -60,6 +60,7 @@ function syncWorldCode(context: GameContext, branch: CodeBranch): void {
   if (branch.activeWorld) context.runtime.setCode(branch.user, branch.modules, branch.branch);
 }
 
+/** A new branch document; like upstream it has no `activeWorld`/`activeSim` flags until set. */
 function createBranch(
   state: GameState,
   userId: string,
@@ -72,8 +73,6 @@ function createBranch(
     user: userId,
     branch: name,
     modules,
-    activeWorld: false,
-    activeSim: false,
     timestamp,
   };
   state.branches[branch._id] = branch;
@@ -90,8 +89,9 @@ export function listBranches(context: GameContext, userId: string): CodeBranch[]
 }
 
 /**
- * Replaces the modules of the branch `selector` names (default the world branch), marks the player
- * active and runs the code from the next tick when it is the world branch.
+ * Replaces the modules of the branch `selector` names (default the world branch) and runs the code
+ * from the next tick when it is the world branch. The player is marked active first, as upstream
+ * does even when the branch then turns out not to exist.
  */
 export function saveCode(
   context: GameContext,
@@ -100,9 +100,9 @@ export function saveCode(
   selector = '$activeWorld',
 ): CodeBranch {
   const user = context.state.world.users[userId];
+  if (user) user.active = 10000;
   const branch = findBranch(context.state, userId, selector);
   if (!user || !branch) throw new GameError('branch does not exist');
-  user.active = 10000;
   branch.modules = structuredClone(modules);
   branch.timestamp = context.now();
   syncWorldCode(context, branch);

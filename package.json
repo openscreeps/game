@@ -27,16 +27,18 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "node --test test/**/*.test.ts",
+    "conformance:setup": "node conformance/setup.mjs",
+    "conformance": "node conformance/backend.mjs",
     "check": "npm run typecheck && npm run lint && npm run format:check && npm test && npm run build"
   },
   "license": "ISC",
   "dependencies": {
-    "@openscreeps/engine": "github:openscreeps/engine#f6ac8eb"
+    "@openscreeps/engine": "github:openscreeps/engine#55883bef45d0d1c3c8c16e497fca56fe0b43ff11"
   },
   "allowScripts": {
     "esbuild@0.28.2": true,
     "isolated-vm@7.0.1": true,
-    "github:openscreeps/engine#f6ac8ebf9ae6b9fd2bd8e2f90503036f7685d9af": true
+    "github:openscreeps/engine#55883bef45d0d1c3c8c16e497fca56fe0b43ff11": true
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

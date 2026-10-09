@@ -1,5 +1,6 @@
-import { constants as C, storeIntents } from '@openscreeps/engine';
-import { GameError, type GameState, type RoomObject } from '../contracts.ts';
+import { storeIntents } from '@openscreeps/engine';
+import { GameError, type GameState } from '../contracts.ts';
+import { isRecord } from '../guards.ts';
 import { activateRoom } from '../world/rooms.ts';
 import { checkGameRoom, ownValue, roomController, type GameOperationContext } from './support.ts';
 
@@ -16,8 +17,8 @@ export interface GlobalIntentInput {
   intent: unknown;
 }
 
-/** Room-level intents the room processor handles (`processRoomIntents`). */
-const ROOM_INTENTS: Readonly<Record<string, true>> = {
+/** Room-level intents the room processor iterates as lists (`processRoomIntents`). */
+const ROOM_LIST_INTENTS: Readonly<Record<string, true>> = {
   removeFlag: true,
   createFlag: true,
   createConstructionSite: true,
@@ -26,80 +27,113 @@ const ROOM_INTENTS: Readonly<Record<string, true>> = {
 };
 
 /**
- * Global intents accepted from players outside their code: power creep account actions and the
- * market, which the global processor fully validates. Account intents (`generatePixel`, `unlockCpu`,
- * `activateAccess`) are excluded because only the runtime charges their cost (CPU bucket) before
- * recording them.
+ * Official-game account intents the engine knows but the pinned backend's `sanitizeUserIntents`
+ * does not: upstream drops them. Only the runtime may record them, because only it charges their
+ * cost (CPU bucket) first.
  */
-const GLOBAL_INTENTS: Readonly<Record<string, true>> = {
-  spawnPowerCreep: true,
-  suicidePowerCreep: true,
-  deletePowerCreep: true,
-  upgradePowerCreep: true,
-  createPowerCreep: true,
-  renamePowerCreep: true,
-  createOrder: true,
-  changeOrderPrice: true,
-  extendOrder: true,
-  cancelOrder: true,
-  deal: true,
+const UNKNOWN_UPSTREAM_INTENTS: Readonly<Record<string, true>> = {
+  generatePixel: true,
+  unlockCpu: true,
+  activateAccess: true,
 };
 
-function listOf(value: unknown): readonly unknown[] {
-  return Array.isArray(value) ? (value as readonly unknown[]) : [];
+/** Placeholder object id for sanitizing one payload through the engine's stored-intent schema. */
+const SANITIZE_KEY = 'intent';
+
+/**
+ * Upstream `sanitizeIntent(name, payload)` for one single (non-list) payload, through the engine's
+ * schema; `undefined` for intents the pinned backend does not know. The result is JSON
+ * round-tripped as the backend's storage RPC does (`NaN` becomes `null`, `undefined` fields drop).
+ */
+function sanitizePayload(name: string, payload: unknown): unknown {
+  if (Object.hasOwn(UNKNOWN_UPSTREAM_INTENTS, name)) {
+    return undefined;
+  }
+  const stored = storeIntents({ [SANITIZE_KEY]: { [name]: payload } }, () => SANITIZE_KEY);
+  const sanitized: Readonly<Record<string, unknown>> =
+    stored.rooms[SANITIZE_KEY]?.[SANITIZE_KEY] ?? {};
+  const value = ownValue(sanitized, name);
+  return value === undefined ? undefined : (JSON.parse(JSON.stringify(value)) as unknown);
 }
 
 /**
- * Sanitizes `{[name]: intent}` for one room object exactly like upstream
- * `sanitizeUserIntents({[name]: intent})`, using the engine's stored-intent schema.
+ * Upstream `sanitizeUserIntents({[name]: payload})` for a manual object or room intent: a falsy
+ * payload or unknown intent yields `{}`, a list is sanitized element by element.
+ *
+ * Payload shapes the processor cannot survive are refused (`invalid params`): it reads single
+ * object intents as objects (a list would make e.g. `createCreep` call `undefined.slice`) and
+ * iterates the room-level ones with `forEach` (a single object would throw). Upstream stores both
+ * and its room processor then throws for every player in that room. Room-level list entries must
+ * also name the target room: their processors create flags and construction sites in
+ * `intent.roomName`, so a foreign room would escape the room the intent was queued for.
  */
-function sanitizeObjectIntent(
+function sanitizeManualIntent(
   room: string,
-  objectId: string,
-  name: string,
-  intent: unknown,
+  targetId: string,
+  name: string | undefined,
+  payload: unknown,
 ): Record<string, unknown> {
-  const stored = storeIntents({ [objectId]: { [name]: intent } }, () => room);
-  const sanitized: Readonly<Record<string, unknown>> = stored.rooms[room]?.[objectId] ?? {};
-  if (!Object.hasOwn(sanitized, name)) {
+  if (name === undefined || !payload) {
+    return {};
+  }
+  const roomList = targetId === 'room' && Object.hasOwn(ROOM_LIST_INTENTS, name);
+  if (Array.isArray(payload) ? targetId !== 'room' : roomList) {
     throw new GameError('invalid params');
   }
-  return { [name]: sanitized[name] };
-}
-
-/**
- * Sanitizes a list of room-level intents element by element (keeping their order). Every element
- * must name `room` as its `roomName` before it reaches the engine sanitizer: the processors create
- * flags and construction sites in `intent.roomName`, so a foreign room name would escape the room
- * whose ownership was validated, and the sanitizer groups by that name with plain property writes.
- */
-function sanitizeRoomIntents(room: string, name: string, intents: unknown): unknown[] {
-  if (!Object.hasOwn(ROOM_INTENTS, name) || !Array.isArray(intents) || !intents.length) {
-    throw new GameError('invalid params');
+  if (!Array.isArray(payload)) {
+    const sanitized = sanitizePayload(name, payload);
+    return sanitized === undefined ? {} : { [name]: sanitized };
   }
-  return (intents as readonly unknown[]).map((intent) => {
+  const list = (payload as readonly unknown[]).map((item) => {
+    // upstream throws on `null`/`undefined` entries (`intent[field]`) and stores nothing
     if (
-      typeof intent !== 'object' ||
-      intent === null ||
-      !('roomName' in intent) ||
-      intent.roomName !== room
+      item === null ||
+      item === undefined ||
+      (roomList && (!isRecord(item) || item.roomName !== room))
     ) {
       throw new GameError('invalid params');
     }
-    const stored = storeIntents({ room: { [name]: [intent] } }, () => undefined);
-    const bucket: Readonly<Record<string, unknown>> | undefined = stored.rooms[room]?.['room'];
-    const [sanitized] = listOf(bucket?.[name]);
-    if (sanitized === undefined) {
-      throw new GameError('invalid params');
-    }
-    return sanitized;
+    return sanitizePayload(name, item);
   });
+  return list.includes(undefined) ? {} : { [name]: list };
 }
 
 /**
- * Queues manual object intents for the next tick (upstream `rooms.intents` `objectsManual` merge):
- * one payload per intent name per object, the latest request winning, while room-level intent
- * lists accumulate so several clicks within one tick are all processed.
+ * lodash 3 `_.merge` of JSON values, as the backend's storage applies `$merge`: plain objects and
+ * arrays merge recursively (arrays index by index), `undefined` never overwrites.
+ */
+function mergeInto(target: Record<string, unknown> | unknown[], source: unknown): void {
+  const entries: Array<[string | number, unknown]> = Array.isArray(source)
+    ? source.map((value, index): [number, unknown] => [index, value])
+    : isRecord(source)
+      ? Object.entries(source)
+      : [];
+  for (const [key, value] of entries) {
+    const current: unknown = Reflect.get(target, key);
+    let next: unknown = value;
+    if (Array.isArray(value)) {
+      next = Array.isArray(current) ? current : [];
+      mergeInto(next as unknown[], value);
+    } else if (isRecord(value)) {
+      next = isRecord(current) ? current : {};
+      mergeInto(next as Record<string, unknown>, value);
+    } else if (value === undefined) {
+      continue;
+    }
+    Reflect.defineProperty(target, key, {
+      value: next,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+}
+
+/**
+ * Queues manual object intents for the next tick exactly like upstream's `rooms.intents` update
+ * `{$merge: {users: {[user]: {objectsManual: {[target]: intents}}}}}`: payloads deep-merge into
+ * what is already queued for the target (lists index by index, so a later room-level list
+ * overwrites the earlier one's leading entries).
  */
 function queueManualIntents(
   state: GameState,
@@ -111,11 +145,8 @@ function queueManualIntents(
   const rooms = { ...state.pendingIntents };
   const users = { ...rooms[room] };
   const targets = { ...users[userId] };
-  const previous: Readonly<Record<string, unknown>> = targets[targetId] ?? {};
-  const merged: Record<string, unknown> = { ...previous };
-  for (const [name, payload] of Object.entries(intents)) {
-    merged[name] = targetId === 'room' ? [...listOf(previous[name]), ...listOf(payload)] : payload;
-  }
+  const merged: Record<string, unknown> = structuredClone(targets[targetId] ?? {});
+  mergeInto(merged, intents);
   targets[targetId] = merged;
   users[userId] = targets;
   rooms[room] = users;
@@ -123,51 +154,13 @@ function queueManualIntents(
 }
 
 /**
- * Manual safe mode bypasses the runtime's `Controller.activateSafeMode` checks, so they are
- * repeated here: one room in safe mode per player (counting activations already queued for this
- * tick), and the controller conditions the processor enforces.
- */
-function checkManualSafeMode(state: GameState, userId: string, controller: RoomObject): void {
-  const { world, pendingIntents } = state;
-  const gameTime = world.gameTime;
-  const queuedElsewhere = Object.values(pendingIntents).some((byUser) =>
-    Object.entries(byUser[userId] ?? {}).some(
-      ([targetId, intents]) => targetId !== controller._id && intents.activateSafeMode,
-    ),
-  );
-  if (
-    queuedElsewhere ||
-    Object.values(world.roomObjects).some(
-      (object) =>
-        object.type === 'controller' && object.user === userId && (object.safeMode ?? 0) > gameTime,
-    )
-  ) {
-    throw new GameError('safe mode active already');
-  }
-  if (controller.type !== 'controller' || !controller.level) {
-    throw new GameError('invalid object');
-  }
-  if (!((controller.safeModeAvailable ?? 0) > 0)) {
-    throw new GameError('no safe mode available');
-  }
-  if (
-    (controller.safeModeCooldown ?? 0) >= gameTime ||
-    (controller.upgradeBlocked ?? 0) > gameTime
-  ) {
-    throw new GameError('safe mode cooldown');
-  }
-  const downgrade = ownValue<number>(C.CONTROLLER_DOWNGRADE, String(controller.level)) ?? 0;
-  if (
-    (controller.downgradeTime ?? 0) <
-    gameTime + downgrade / 2 - C.CONTROLLER_DOWNGRADE_SAFEMODE_THRESHOLD
-  ) {
-    throw new GameError('controller downgrading');
-  }
-}
-
-/**
- * Upstream `/add-object-intent`: queues a sanitized manual intent for an object the user owns (or
- * whose room controller they own), or room-level intents, and activates the room for next tick.
+ * Upstream `/add-object-intent`: queues a sanitized manual intent and activates the room for the
+ * next tick. `activateSafeMode` is refused while one of the player's rooms is in safe mode (the
+ * processor checks the controller itself).
+ *
+ * Unlike upstream, object intents are only accepted for objects in that room the player owns (or,
+ * for unowned structures, whose room controller the player owns): the processor skips other
+ * players' objects but runs intents of unowned ones (e.g. `send` from an NPC terminal).
  */
 export function addObjectIntent(
   game: GameOperationContext,
@@ -178,14 +171,20 @@ export function addObjectIntent(
   const { world } = state;
   const room = checkGameRoom(world, input.room, game.now());
   const { targetId, name, intent } = input;
-  if (name === undefined || targetId === undefined) {
-    throw new GameError('invalid params');
+  if (name === 'activateSafeMode') {
+    const gameTime = world.gameTime;
+    const active = Object.values(world.roomObjects).some(
+      (object) =>
+        object.type === 'controller' && object.user === userId && (object.safeMode ?? 0) > gameTime,
+    );
+    if (active) {
+      throw new GameError('safe mode active already');
+    }
   }
-  if (targetId === 'room') {
-    queueManualIntents(state, room, userId, 'room', {
-      [name]: sanitizeRoomIntents(room, name, intent),
-    });
-  } else {
+  if (targetId === undefined) {
+    throw new GameError('invalid object');
+  }
+  if (targetId !== 'room') {
     const object = ownValue(world.roomObjects, targetId);
     if (!object || object.room !== room) {
       throw new GameError('invalid object');
@@ -194,35 +193,30 @@ export function addObjectIntent(
     if (owner !== userId) {
       throw new GameError('not owner');
     }
-    const sanitized = sanitizeObjectIntent(room, object._id, name, intent);
-    if (name === 'activateSafeMode') {
-      checkManualSafeMode(state, userId, object);
-    }
-    queueManualIntents(state, room, userId, object._id, sanitized);
   }
+  const intents = sanitizeManualIntent(room, targetId, name, intent);
+  queueManualIntents(state, room, userId, targetId, intents);
   activateRoom(world, room);
 }
 
 /**
- * Upstream `/add-global-intent`: queues one sanitized power creep or market intent (upstream
- * inserts one `users.intents` document per request).
+ * Upstream `/add-global-intent`: queues one sanitized global intent (upstream inserts one
+ * `users.intents` document per request, `{}` for an unknown intent).
  */
 export function addGlobalIntent(state: GameState, userId: string, input: GlobalIntentInput): void {
   const { name } = input;
-  if (name === undefined || !Object.hasOwn(GLOBAL_INTENTS, name)) {
-    throw new GameError('invalid params');
+  const merged: Record<string, unknown> = { ...state.pendingGlobalIntents[userId] };
+  if (name !== undefined && !Object.hasOwn(UNKNOWN_UPSTREAM_INTENTS, name)) {
+    const stored = storeIntents({ global: { [name]: [input.intent] } }, () => undefined);
+    const list = ownValue<unknown>(stored.global ?? {}, name);
+    if (Array.isArray(list)) {
+      const queued = merged[name];
+      merged[name] = [
+        ...(Array.isArray(queued) ? (queued as unknown[]) : []),
+        ...(JSON.parse(JSON.stringify(list)) as unknown[]),
+      ];
+    }
   }
-  const stored = storeIntents({ global: { [name]: [input.intent] } }, () => undefined);
-  const global: Readonly<Record<string, unknown>> = stored.global ?? {};
-  const intents = listOf(global[name]);
-  if (intents.length !== 1) {
-    throw new GameError('invalid params');
-  }
-  const previous: Readonly<Record<string, unknown>> = state.pendingGlobalIntents[userId] ?? {};
-  const merged: Record<string, unknown> = {
-    ...previous,
-    [name]: [...listOf(previous[name]), ...intents],
-  };
   state.pendingGlobalIntents = {
     ...state.pendingGlobalIntents,
     [userId]: merged,

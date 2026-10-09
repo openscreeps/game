@@ -62,7 +62,6 @@ export function createPlayer(context: GameContext, options: CreatePlayerOptions)
   const { state } = context;
   const { username } = options;
   if (username !== undefined) checkNewUsername(state, username);
-  const now = context.now();
   const id = newId(state);
   const user: User = {
     _id: id,
@@ -86,6 +85,7 @@ export function createPlayer(context: GameContext, options: CreatePlayerOptions)
   const branchId = newId(state);
 
   state.world.users[id] = user;
+  // like upstream registration, the default branch has no timestamp until code is saved
   state.branches[branchId] = {
     _id: branchId,
     user: id,
@@ -93,7 +93,6 @@ export function createPlayer(context: GameContext, options: CreatePlayerOptions)
     modules,
     activeWorld: true,
     activeSim: true,
-    timestamp: now,
   };
   context.runtime.setCode(id, modules, 'default');
   context.runtime.setMemory(id, '{}');

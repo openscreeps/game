@@ -94,9 +94,9 @@ const GAME_COLLECTIONS: Readonly<Record<string, (entry: unknown) => boolean>> = 
     isRecord(entry) &&
     ['_id', 'user', 'branch'].every((key) => typeof entry[key] === 'string') &&
     modules(entry.modules) &&
-    typeof entry.activeWorld === 'boolean' &&
-    typeof entry.activeSim === 'boolean' &&
-    finite(entry.timestamp),
+    (entry.activeWorld === undefined || typeof entry.activeWorld === 'boolean') &&
+    (entry.activeSim === undefined || typeof entry.activeSim === 'boolean') &&
+    (entry.timestamp === undefined || finite(entry.timestamp)),
   history: (entry) =>
     Array.isArray(entry) &&
     entry.every(
@@ -120,7 +120,10 @@ function validateWorld(world: Record<string, unknown>): void {
     !Number.isSafeInteger(world.idCounter) ||
     typeof world.rngState !== 'number' ||
     !strings(world.activeRooms) ||
-    typeof world.restrictedShard !== 'boolean'
+    typeof world.restrictedShard !== 'boolean' ||
+    (world.writeSeq !== undefined && !Number.isSafeInteger(world.writeSeq)) ||
+    (world.roomObjectWriteSeq !== undefined &&
+      !entriesMatch(world.roomObjectWriteSeq, (seq) => Number.isSafeInteger(seq)))
   ) {
     throw new Error('Invalid world snapshot');
   }

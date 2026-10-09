@@ -96,6 +96,15 @@ already validated committed state. It keeps player heaps only if the restored
 runtime snapshot equals the live runtime data. Server persistence remains
 responsible for atomic commits and external publication after commit.
 
+Room-object processing follows the pinned storage write order; rooms use its
+LIFO queue. Domain and world operations record their own writes. If an embedder
+directly changes a room object, call `recordRoomObjectWrite(world, id)` afterwards;
+for bulk writes use `recordRoomObjectWrites(world, ids)` with IDs in actual write
+order. Both are exported by this package. Removals need no call; otherwise
+unrecorded inserts are discovered at the next tick or recorded write.
+Snapshots preserve `roomObjectWriteSeq` and `writeSeq`; do not discard or edit
+these fields. See [engine#4](https://github.com/openscreeps/engine/issues/4).
+
 Room history is disabled by default; set `historyTicks` and `historyChunkSize` to
 retain it. Supply `now` for a controlled maintenance clock. CPU measurements still
 depend on hardware, and player use of time/randomness affects replay equivalence.
@@ -109,3 +118,45 @@ pinned in `reference-versions.json`; simulation uses the engine revision pinned
 in the package manifest. This is not a claim of equivalence to private MMO
 infrastructure. Upstream attribution is retained in `LICENSE` and
 `THIRD_PARTY_NOTICES.md`.
+
+## Differential conformance
+
+```sh
+npm run conformance:setup
+npm run conformance
+```
+
+Setup clones the pinned backend, common and storage implementations into
+`.reference/` and installs their locked JavaScript dependencies with lifecycle
+scripts disabled. Both setup and execution reject changed upstream tracked files
+or incorrect checkout revisions. The runner executes original backend modules
+with original LokiJS storage, fixed clocks and controlled random inputs; it does
+not substitute reimplemented game rules for the reference.
+
+For a focused reproduction and machine-readable report:
+
+```sh
+node conformance/backend.mjs --list
+node conformance/backend.mjs --scenario world.generate.options --out .reference/report.json
+```
+
+Reports distinguish matching steps, unexpected differences, execution errors and
+explicit expected divergences. They include reference revisions, source state,
+normalization and unsupported areas. New generated IDs are compared through a
+document correspondence; pre-existing IDs and semantic fields remain checked.
+Unexpected differences or scenario errors fail the command. CI runs the suite on
+Windows and Ubuntu.
+
+The policy is **preserve safety and completed functionality, match gameplay**:
+ordinary upstream gameplay quirks are preserved, but credential/security and
+unrelated-player protections remain. Working features are not removed to emulate
+upstream TODOs, crashes or no-ops. Each expected divergence asserts exact outcomes
+on both sides and is reported separately, never counted as a matching step.
+See [CONFORMANCE.md](CONFORMANCE.md) for the complete divergence register, coverage
+boundaries, reproduced defects and linked GitHub tickets.
+
+This is scenario-based evidence against public standalone sources, not proof of
+complete Screeps parity. It does not verify live Steam authentication, an
+interactive official-client session, private MMO services or all gameplay
+combinations. Runtime and multi-tick processor comparisons live in the engine
+repository. Reproduced defects are tracked in the game and engine GitHub issues.

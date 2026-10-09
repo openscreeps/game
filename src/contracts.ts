@@ -34,9 +34,11 @@ export interface CodeBranch {
   user: string;
   branch: string;
   modules: CodeModules;
-  activeWorld: boolean;
-  activeSim: boolean;
-  timestamp: number;
+  /** Absent on branches created without an active flag (upstream branch listing/cloning). */
+  activeWorld?: boolean;
+  activeSim?: boolean;
+  /** Last code save; absent until code is first saved (upstream default branches have none). */
+  timestamp?: number;
 }
 export interface HistoryFrame {
   time: number;

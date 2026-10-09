@@ -3,7 +3,12 @@
  * Copyright (c) 2016, Artem Chivchalov <contact@screeps.com>. ISC license (see THIRD_PARTY_NOTICES.md).
  */
 
-import { constants as C, strongholds, type WorldState } from '@openscreeps/engine';
+import {
+  constants as C,
+  recordRoomObjectWrite,
+  strongholds,
+  type WorldState,
+} from '@openscreeps/engine';
 import { findFreePos } from './generate.ts';
 import { WorldRandom } from './random.ts';
 import {
@@ -31,7 +36,11 @@ export type StrongholdTemplateName = keyof typeof strongholds.templates;
 export interface SpawnStrongholdOptions {
   /** Template to spawn; default random among those that fit. */
   templateName?: string;
-  /** Core position; used together with `templateName`. */
+  /**
+   * Core position; used together with `templateName`. Deliberate difference: upstream returns
+   * without spawning anything in that case (`lib/strongholds.js:44-45`); here the stronghold is
+   * placed there when the template fits.
+   */
   x?: number;
   y?: number;
   /** Owner of the stronghold structures; default `'2'` (Invader). */
@@ -189,6 +198,7 @@ export function spawnStronghold(
     controller.progress = 0;
     controller.downgradeTime = deployTime;
     controller.effects = invulnerability();
+    recordRoomObjectWrite(world, controller._id);
   }
   for (const structure of structures) {
     insertObject(world, structure);
@@ -316,6 +326,7 @@ export function expandStronghold(
   }
   const level = invaderCore.level as keyof typeof C.INVADER_CORE_EXPAND_TIME;
   invaderCore.nextExpandTime = gameTime + C.INVADER_CORE_EXPAND_TIME[level];
+  recordRoomObjectWrite(world, invaderCore._id);
 
   const openList = [invaderCore.room];
   const closedList: string[] = [];

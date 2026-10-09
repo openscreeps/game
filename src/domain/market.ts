@@ -54,14 +54,20 @@ export function marketOrderIndex(world: WorldState): MarketOrderIndexEntry[] {
   return [...list.values()];
 }
 
-/** Active orders of one resource as seen by a player. */
+/**
+ * Active orders of one resource as seen by a player; without a resource type every active order
+ * (upstream queries `{resourceType: undefined}`, which LokiJS matches against any document).
+ */
 export function activeMarketOrders(
   world: WorldState,
   viewerId: string,
   resourceType?: string,
 ): Array<Record<string, unknown>> {
   return Object.values(world.marketOrders)
-    .filter((order) => order.active && order.resourceType === resourceType)
+    .filter(
+      (order) =>
+        order.active && (resourceType === undefined || order.resourceType === resourceType),
+    )
     .map((order) => orderView(order, viewerId));
 }
 
@@ -75,9 +81,9 @@ export function userMarketOrders(
     .map((order) => orderView(order, userId));
 }
 
-/** Daily market statistics of one resource, newest first. */
+/** Daily market statistics of one resource (every resource without one), newest first. */
 export function marketHistory(world: WorldState, resourceType?: string): MarketStats[] {
   return Object.values(world.marketStats)
-    .filter((stats) => stats.resourceType === resourceType)
+    .filter((stats) => resourceType === undefined || stats.resourceType === resourceType)
     .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
 }
