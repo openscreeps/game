@@ -37,8 +37,9 @@ scenarios added later were checked individually on the baseline:
 `maintenance.genPowerBanks.occupied-spots` and `npc.bots.username-case` mismatch,
 and `npc.strongholds.explicit-position` gives the same expected divergence as
 today. A carried mismatch repeats a difference caused by an earlier step, so
-these counts are not counts of independent bugs. Every defect below is fixed
-in the working tree and stays open until the fix is published.
+these counts are not counts of independent bugs. The defects below have
+checked-in fixes; their issues record the verified publication revision and
+resolution status. Retained divergences remain open separately.
 
 | Defect                                                                                                                             | Reproduction (`--scenario`)                                                                                                             | Tracking                                                 |
 | ---------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
