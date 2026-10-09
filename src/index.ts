@@ -1,3 +1,6 @@
+/** Canonical world data, rules and player runtime used by game hosts and scenario fixtures. */
+export { BotRuntime, constants, createWorldState } from '@openscreeps/engine';
+export type { CodeModules, UserRunResult, WorldState } from '@openscreeps/engine';
 export { GameSession } from './session.ts';
 export type { AdoptOptions, GameSessionOptions, GameTick } from './session.ts';
 export { createGameState, gameStateOf, parseGameState } from './state.ts';
