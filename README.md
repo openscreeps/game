@@ -50,6 +50,10 @@ The package is currently distributed from Git, not the npm registry. Consumers
 should pin a full commit of `github:openscreeps/game` and approve its build script
 under their npm install-script policy. The `prepare` script builds distributable
 JavaScript and declarations when installed from Git.
+The engine pin is `d9c5a8f50d654273fa5e5645f05afca65e6c3274`, including
+accuracy-checked reductions in world scanning and runtime-index allocations.
+Maintenance, tick processing and storage ordering remain enabled and unchanged.
+
 
 ## Run a world
 
