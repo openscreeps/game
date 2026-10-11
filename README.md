@@ -31,6 +31,21 @@ Git dependency and this package; no sibling engine checkout is required.
 `npm run check` runs strict TypeScript, ESLint, formatting, behavioral tests and
 declaration compilation on the package.
 
+To verify an unpublished change in a sibling engine checkout without changing
+the portable Git dependency pin:
+
+```sh
+npm --prefix ../engine run build
+npm install --no-save --package-lock=false --ignore-scripts ../engine
+npm run check
+```
+
+This links the locally built engine for development only. A clean installation
+still uses the pinned Git revision; publishing the engine change and updating
+the dependency pin and lockfile are required before distributing it with the game.
+The engine's `examples/simulation-benchmark.ts` measures production-sized
+simulation workloads independently of player scripts and persistence.
+
 The package is currently distributed from Git, not the npm registry. Consumers
 should pin a full commit of `github:openscreeps/game` and approve its build script
 under their npm install-script policy. The `prepare` script builds distributable
