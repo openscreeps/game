@@ -4,7 +4,14 @@
  * Copyright (c) 2016, Artem Chivchalov <contact@screeps.com>. ISC license (see THIRD_PARTY_NOTICES.md).
  */
 
-import { constants as C, createWorldState, type WorldState } from '@openscreeps/engine';
+import {
+  bindWorldConstants,
+  constants as C,
+  createWorldState,
+  worldConstants,
+  type Constants,
+  type WorldState,
+} from '@openscreeps/engine';
 import type { GameState } from '../contracts.ts';
 import { seedState, WorldRandom } from './random.ts';
 import {
@@ -16,7 +23,6 @@ import {
   isVeryCenter,
   isWallAt,
   nextId,
-  OBSTACLE_TYPES,
   roomNameFromXY,
   roomNameToXY,
   roomObjectsOf,
@@ -515,6 +521,7 @@ export function generateRoom(
   if (world.rooms[roomName]) {
     throw new Error('This room already exists');
   }
+  const C = worldConstants(world);
   const random = new WorldRandom(world);
   const [rx, ry] = roomNameToXY(roomName);
   const neighbors: Record<ExitSide, string> = {
@@ -736,8 +743,9 @@ export function findFreePos(
   if (terrain === undefined) {
     return undefined;
   }
+  const obstacleTypes: readonly string[] = worldConstants(world).OBSTACLE_OBJECT_TYPES;
   const blockers = roomObjectsOf(world, roomName).filter(
-    (i) => OBSTACLE_TYPES[i.type] === true || i.type === 'rampart' || i.type === 'portal',
+    (i) => obstacleTypes.includes(i.type) || i.type === 'rampart' || i.type === 'portal',
   );
   for (let counter = 0; counter < 500; counter++) {
     const x = rect.x1 + random.index(rect.x2 - rect.x1);
@@ -881,6 +889,11 @@ export interface CreateWorldOptions {
   size: number;
   seed: number;
   shardName: string;
+  /**
+   * The world's constants (server mods), bound to the new world for generation and every later
+   * game operation on it (see `worldConstants`). Default: the upstream values.
+   */
+  constants?: Constants;
 }
 
 /** Highway segment between two crossroads; all its rooms share a deposit type. */
@@ -933,6 +946,9 @@ export function createWorld(options: CreateWorldOptions): WorldState {
     throw new Error(`Invalid world size ${String(size)}`);
   }
   const world = createWorldState({ shardName, rngState: seedState(seed) });
+  if (options.constants) {
+    bindWorldConstants(world, options.constants);
+  }
   const random = new WorldRandom(world);
 
   world.users['2'] = {

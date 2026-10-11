@@ -17,6 +17,9 @@ export interface GlobalIntentInput {
   intent: unknown;
 }
 
+/** Trusted backend-mod intent schemas, never accepted from a player's request body. */
+export type CustomIntentSchemas = NonNullable<Parameters<typeof storeIntents>[2]>;
+
 /** Room-level intents the room processor iterates as lists (`processRoomIntents`). */
 const ROOM_LIST_INTENTS: Readonly<Record<string, true>> = {
   removeFlag: true,
@@ -45,11 +48,11 @@ const SANITIZE_KEY = 'intent';
  * schema; `undefined` for intents the pinned backend does not know. The result is JSON
  * round-tripped as the backend's storage RPC does (`NaN` becomes `null`, `undefined` fields drop).
  */
-function sanitizePayload(name: string, payload: unknown): unknown {
+function sanitizePayload(name: string, payload: unknown, schemas?: CustomIntentSchemas): unknown {
   if (Object.hasOwn(UNKNOWN_UPSTREAM_INTENTS, name)) {
     return undefined;
   }
-  const stored = storeIntents({ [SANITIZE_KEY]: { [name]: payload } }, () => SANITIZE_KEY);
+  const stored = storeIntents({ [SANITIZE_KEY]: { [name]: payload } }, () => SANITIZE_KEY, schemas);
   const sanitized: Readonly<Record<string, unknown>> =
     stored.rooms[SANITIZE_KEY]?.[SANITIZE_KEY] ?? {};
   const value = ownValue(sanitized, name);
@@ -72,6 +75,7 @@ function sanitizeManualIntent(
   targetId: string,
   name: string | undefined,
   payload: unknown,
+  schemas?: CustomIntentSchemas,
 ): Record<string, unknown> {
   if (name === undefined || !payload) {
     return {};
@@ -81,7 +85,7 @@ function sanitizeManualIntent(
     throw new GameError('invalid params');
   }
   if (!Array.isArray(payload)) {
-    const sanitized = sanitizePayload(name, payload);
+    const sanitized = sanitizePayload(name, payload, schemas);
     return sanitized === undefined ? {} : { [name]: sanitized };
   }
   const list = (payload as readonly unknown[]).map((item) => {
@@ -93,7 +97,7 @@ function sanitizeManualIntent(
     ) {
       throw new GameError('invalid params');
     }
-    return sanitizePayload(name, item);
+    return sanitizePayload(name, item, schemas);
   });
   return list.includes(undefined) ? {} : { [name]: list };
 }
@@ -166,6 +170,7 @@ export function addObjectIntent(
   game: GameOperationContext,
   userId: string,
   input: ObjectIntentInput,
+  schemas?: CustomIntentSchemas,
 ): void {
   const { state } = game;
   const { world } = state;
@@ -194,7 +199,7 @@ export function addObjectIntent(
       throw new GameError('not owner');
     }
   }
-  const intents = sanitizeManualIntent(room, targetId, name, intent);
+  const intents = sanitizeManualIntent(room, targetId, name, intent, schemas);
   queueManualIntents(state, room, userId, targetId, intents);
   activateRoom(world, room);
 }
@@ -203,11 +208,16 @@ export function addObjectIntent(
  * Upstream `/add-global-intent`: queues one sanitized global intent (upstream inserts one
  * `users.intents` document per request, `{}` for an unknown intent).
  */
-export function addGlobalIntent(state: GameState, userId: string, input: GlobalIntentInput): void {
+export function addGlobalIntent(
+  state: GameState,
+  userId: string,
+  input: GlobalIntentInput,
+  schemas?: CustomIntentSchemas,
+): void {
   const { name } = input;
   const merged: Record<string, unknown> = { ...state.pendingGlobalIntents[userId] };
   if (name !== undefined && !Object.hasOwn(UNKNOWN_UPSTREAM_INTENTS, name)) {
-    const stored = storeIntents({ global: { [name]: [input.intent] } }, () => undefined);
+    const stored = storeIntents({ global: { [name]: [input.intent] } }, () => undefined, schemas);
     const list = ownValue<unknown>(stored.global ?? {}, name);
     if (Array.isArray(list)) {
       const queued = merged[name];

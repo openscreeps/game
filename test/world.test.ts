@@ -476,6 +476,10 @@ void describe('maintenance jobs', () => {
       { userId: outbox[0]?.userId, email: outbox[0]?.email, messages: outbox[0]?.messages },
       { userId: 'a', email: 'a@example.com', messages: ['msg 1\n[msg] (2)', 'msg 2\n[msg] (2)'] },
     );
+    assert.deepEqual(outbox[0]?.notifications, [
+      { message: 'msg 1', date: NOW - 10, count: 2, type: 'msg' },
+      { message: 'msg 2', date: NOW - 5, count: 2, type: 'msg' },
+    ]);
     assert.deepEqual(Object.keys(world.notifications), ['future']);
     // the default interval is 60 minutes
     assert.deepEqual(runJob(state, 'sendNotifications', NOW + 59 * 60_000, hooks), []);

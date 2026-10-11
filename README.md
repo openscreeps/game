@@ -25,10 +25,11 @@ mise run install
 npm run check
 ```
 
-Node 24.21.0 is pinned in `mise.toml`. Installation builds the pinned engine Git
-dependency and this package. `isolated-vm` requires a supported native binary or
-build toolchain. `npm run check` runs strict TypeScript, ESLint, formatting,
-behavioral tests and declaration compilation on the package.
+Node 24.21.0 is pinned in `mise.toml`. Installation builds the commit-pinned engine
+Git dependency and this package; no sibling engine checkout is required.
+`isolated-vm` requires a supported native binary or build toolchain.
+`npm run check` runs strict TypeScript, ESLint, formatting, behavioral tests and
+declaration compilation on the package.
 
 The package is currently distributed from Git, not the npm registry. Consumers
 should pin a full commit of `github:openscreeps/game` and approve its build script
@@ -67,7 +68,13 @@ try {
 `GameSession` owns the live player runtime and simulation. `tick()` runs due
 maintenance, refreshes changed terrain, executes player scripts, resolves queued
 intents, advances simulation and records statistics. Its result includes runtime
-and simulation results plus maintenance failures and notification batches.
+and simulation results plus maintenance failures and notification batches. Hosts
+that run maintenance on their own wall clock, as the upstream backend's one-second
+cron timer does, pass `maintenance: false` and call `runJob`/`pruneJobs` between
+ticks; `simulation` passes processor hooks for server mods. `constants` gives
+the world its mod-changed constants (a `createConstants()` copy, as also
+accepted by `createGameState`); the session's simulation, player runtime and
+all exported operations on its world use them.
 
 Use `createPlayer`, `saveCode`, `removePlayer` and `spawnBot` on the session for
 player lifecycle operations. Exported functions such as `placeSpawn`,
@@ -109,7 +116,9 @@ Room history is disabled by default; set `historyTicks` and `historyChunkSize` t
 retain it. Supply `now` for a controlled maintenance clock. CPU measurements still
 depend on hardware, and player use of time/randomness affects replay equivalence.
 Notification recipient preferences are supplied through optional maintenance
-hooks; delivery and account credentials remain host responsibilities.
+hooks; delivery and account credentials remain host responsibilities. Each
+notification batch carries formatted `messages` and the source `notifications`
+(`message`, `date`, `count`, `type`) that upstream hands to mailer mods.
 
 ## Source and compatibility
 

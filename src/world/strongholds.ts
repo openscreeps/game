@@ -7,6 +7,7 @@ import {
   constants as C,
   recordRoomObjectWrite,
   strongholds,
+  worldConstants,
   type WorldState,
 } from '@openscreeps/engine';
 import { findFreePos } from './generate.ts';
@@ -20,7 +21,6 @@ import {
   isSectorCenterName,
   isVeryCenter,
   isWallAt,
-  OBSTACLE_TYPES,
   roomNameFromXY,
   roomNameToXY,
   roomObjectsOf,
@@ -70,6 +70,7 @@ export function spawnStronghold(
   roomName: string,
   options: SpawnStrongholdOptions = {},
 ): void {
+  const C = worldConstants(world);
   const random = new WorldRandom(world);
   const deployDelay = options.deployTime || 1;
   if (!roomName || !world.rooms[roomName]) {
@@ -84,8 +85,9 @@ export function spawnStronghold(
   }
   const user = options.user ?? '2';
   const gameTime = world.gameTime;
+  const obstacleTypes: readonly string[] = C.OBSTACLE_OBJECT_TYPES;
   const objects = roomObjectsOf(world, roomName).filter(
-    (o) => o.type === C.STRUCTURE_RAMPART || OBSTACLE_TYPES[o.type] === true,
+    (o) => o.type === C.STRUCTURE_RAMPART || obstacleTypes.includes(o.type),
   );
   const templateNames: StrongholdTemplateName[] =
     options.templateName !== undefined && isTemplateName(options.templateName)
@@ -317,6 +319,7 @@ export function expandStronghold(
   now: number,
   mapGrid?: MapGrid,
 ): boolean {
+  const C = worldConstants(world);
   const random = new WorldRandom(world);
   const grid = mapGrid ?? buildMapGrid(world, now);
   const gameTime = world.gameTime;

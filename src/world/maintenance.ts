@@ -7,7 +7,13 @@
  * account data (e-mail, notification preferences) is only reachable through `MaintenanceHooks`.
  */
 
-import { constants as C, recordRoomObjectWrites, type WorldState } from '@openscreeps/engine';
+import {
+  constants as C,
+  recordRoomObjectWrites,
+  worldConstants,
+  type Constants,
+  type WorldState,
+} from '@openscreeps/engine';
 import type { GameState } from '../contracts.ts';
 import { WorldRandom } from './random.ts';
 import {
@@ -54,12 +60,26 @@ export interface MaintenanceHooks {
   notificationRecipient?(userId: string): NotificationRecipient | undefined;
 }
 
+/**
+ * One due notification as upstream hands it to `sendUserNotifications` (`_.pick(doc, ['message',
+ * 'date', 'count', 'type'])`).
+ */
+export interface NotificationDetail {
+  message: string;
+  date: number;
+  count: number;
+  type: string;
+}
+
 /** One player's due notifications, ready for delivery by the host. */
 export interface NotificationBatch {
   id: string;
   userId: string;
   email?: string;
+  /** Each notification formatted as `message\n[type] (count)`, as the upstream mailer mod does. */
   messages: string[];
+  /** The source notifications, in the same order as `messages`. */
+  notifications: NotificationDetail[];
   date: number;
 }
 
@@ -70,16 +90,16 @@ export interface MaintenanceRun {
 }
 
 export interface MaintenanceReport {
-  /** Jobs that ran, in registry order. */
-  ran: MaintenanceJobName[];
+  /** Jobs that ran, in registry order (hosts scheduling their own table may report other names). */
+  ran: string[];
   /** Jobs that threw; the rest still ran (upstream logs and continues). */
-  errors: Array<{ job: MaintenanceJobName; error: unknown }>;
+  errors: Array<{ job: string; error: unknown }>;
   /** Notification batches produced by `sendNotifications`, in creation order. */
   notifications: NotificationBatch[];
 }
 
 /** `state.jobs` key holding the last run timestamp of a job. */
-export const jobKey = (name: MaintenanceJobName): string => `cron:${name}`;
+export const jobKey = (name: string): string => `cron:${name}`;
 const FORCE_UPDATE_KEY = 'forceUpdate:';
 const NPC_ORDERS_KEY = 'npcOrders:';
 const NOTIFY_KEY = 'notify:';
@@ -127,14 +147,18 @@ function sendNotifications(state: GameState, now: number, run: MaintenanceRun): 
     if (lastNotifyDate && lastNotifyDate + interval > now) {
       continue;
     }
-    const messages = ids.map((id) => {
+    const notifications: NotificationDetail[] = [];
+    for (const id of ids) {
       const n = world.notifications[id];
-      return n ? `${n.message}\n[${n.type}] (${String(n.count)})` : '';
-    });
+      if (n) {
+        notifications.push({ message: n.message, date: n.date, count: n.count, type: n.type });
+      }
+    }
     const entry: NotificationBatch = {
       id: nextId(world, {}),
       userId,
-      messages,
+      messages: notifications.map((n) => `${n.message}\n[${n.type}] (${String(n.count)})`),
+      notifications,
       date: now,
     };
     if (email) {
@@ -189,6 +213,7 @@ function drawWallSpot(random: WorldRandom, terrain: string): { x: number; y: num
 
 function genPowerBanks(state: GameState): void {
   const world = state.world;
+  const C = worldConstants(world);
   const random = new WorldRandom(world);
   const gameTime = world.gameTime;
   for (const room of Object.values(world.rooms)) {
@@ -267,6 +292,7 @@ function getSectorEdges(centralRoomName: string): string[] | undefined {
  */
 function genDeposits(state: GameState): void {
   const world = state.world;
+  const C = worldConstants(world);
   const random = new WorldRandom(world);
   const gameTime = world.gameTime;
   const centralRooms = Object.values(world.rooms).filter(
@@ -510,6 +536,7 @@ function createRaid(
 
 function genInvaders(state: GameState): void {
   const world = state.world;
+  const C = worldConstants(world);
   const random = new WorldRandom(world);
   const active = new Set(world.activeRooms);
   const sectorsWithCore = new Set(
@@ -789,12 +816,13 @@ function calcMarketStats(state: GameState, now: number): void {
 // ---------------------------------------------------------------------------------------------
 // deletePowerCreeps
 
-function calcPowerLevelBase(level: number): number {
+function calcPowerLevelBase(C: Constants, level: number): number {
   return Math.pow(level, C.POWER_LEVEL_POW) * C.POWER_LEVEL_MULTIPLY;
 }
 
 function deletePowerCreeps(state: GameState, now: number): void {
   const world = state.world;
+  const C = worldConstants(world);
   for (const creep of Object.values(world.userPowerCreeps)) {
     if (!creep.deleteTime || creep.deleteTime >= now) {
       continue;
@@ -804,9 +832,9 @@ function deletePowerCreeps(state: GameState, now: number): void {
       // refund the experience of one power level, interpolated within the current level
       const power = user.power ?? 0;
       const level = Math.floor(Math.pow(power / C.POWER_LEVEL_MULTIPLY, 1 / C.POWER_LEVEL_POW));
-      const basePrev = calcPowerLevelBase(level - 1);
-      const baseCurrent = calcPowerLevelBase(level);
-      const baseNext = calcPowerLevelBase(level + 1);
+      const basePrev = calcPowerLevelBase(C, level - 1);
+      const baseCurrent = calcPowerLevelBase(C, level);
+      const baseNext = calcPowerLevelBase(C, level + 1);
       const change = Math.round(
         power -
           basePrev -
@@ -868,8 +896,11 @@ export function runJob(
   return run.notifications;
 }
 
-/** Drop per-room/per-user scheduler entries whose room or user no longer exists. */
-function pruneJobs(state: GameState): void {
+/**
+ * Drop per-room/per-user scheduler entries whose room or user no longer exists. `runMaintenance`
+ * calls it after any job ran; hosts running jobs on their own schedule call it the same way.
+ */
+export function pruneJobs(state: GameState): void {
   for (const key of Object.keys(state.jobs)) {
     const room = key.startsWith(FORCE_UPDATE_KEY)
       ? key.slice(FORCE_UPDATE_KEY.length)

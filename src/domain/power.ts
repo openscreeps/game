@@ -1,4 +1,9 @@
-import { constants as C, recordRoomObjectWrite, type WorldState } from '@openscreeps/engine';
+import {
+  recordRoomObjectWrite,
+  worldConstants,
+  type Constants,
+  type WorldState,
+} from '@openscreeps/engine';
 import { GameError, newId, type GameState, type User } from '../contracts.ts';
 import { gameUser, ownValue, type GameOperationContext } from './support.ts';
 
@@ -26,10 +31,10 @@ export interface RenamePowerCreepInput {
   name?: unknown;
 }
 
-const POWER_INFO: Readonly<
+/** Widened view of `POWER_INFO`, indexed by untrusted power ids. */
+type PowerInfoTable = Readonly<
   Record<string, { readonly className: string; readonly level: readonly number[] }>
-> = C.POWER_INFO;
-const POWER_CLASSES: readonly string[] = Object.values(C.POWER_CLASS);
+>;
 const MAX_POWER_LEVEL = 5;
 const EXPERIMENTATION_DURATION = 24 * 3600 * 1000;
 
@@ -38,7 +43,7 @@ function userPowerCreeps(world: WorldState, userId: string): PowerCreepDoc[] {
 }
 
 /** Upstream `calcFreePowerLevels`: GPL minus one level per creep and every upgraded creep level. */
-function freePowerLevels(user: User, creeps: readonly PowerCreepDoc[]): number {
+function freePowerLevels(C: Constants, user: User, creeps: readonly PowerCreepDoc[]): number {
   const level = Math.floor(
     Math.pow((user.power || 0) / C.POWER_LEVEL_MULTIPLY, 1 / C.POWER_LEVEL_POW),
   );
@@ -62,17 +67,18 @@ function isSpawned(creep: PowerCreepDoc): boolean {
  * Upstream `powersAreValid`: the requested levels must be reachable by taking one power level at a
  * time, each only once the creep level reaches that power's level requirement.
  */
-function powersAreValid(powers: Readonly<Record<string, number>>): boolean {
+function powersAreValid(C: Constants, powers: Readonly<Record<string, number>>): boolean {
+  const powerInfo: PowerInfoTable = C.POWER_INFO;
   const finalLevel = Object.values(powers).reduce((sum, value) => sum + value, 0);
   const levels: Record<string, number> = {};
-  for (const power of Object.keys(POWER_INFO)) {
+  for (const power of Object.keys(powerInfo)) {
     levels[power] = 0;
   }
   let level = 0;
   while (level < finalLevel) {
     const power = Object.keys(powers).find((key) => {
       const current = levels[key] ?? 0;
-      const required = POWER_INFO[key]?.level[current];
+      const required = powerInfo[key]?.level[current];
       return (
         current < MAX_POWER_LEVEL &&
         current < (powers[key] ?? 0) &&
@@ -95,15 +101,17 @@ function powersAreValid(powers: Readonly<Record<string, number>>): boolean {
  * by level, so a fractional level would give the creep undefined effects on other players' objects.
  */
 function readUpgrade(
+  C: Constants,
   creep: PowerCreepDoc,
   input: Readonly<Record<string, unknown>> | undefined,
 ): Record<string, number> {
+  const powerInfo: PowerInfoTable = C.POWER_INFO;
   if (!input) {
     throw new GameError('invalid powers');
   }
   const powers: Record<string, number> = {};
   for (const [power, value] of Object.entries(input)) {
-    const info = ownValue(POWER_INFO, power);
+    const info = ownValue(powerInfo, power);
     if (!info) {
       throw new GameError(`invalid power ${power}`);
     }
@@ -134,12 +142,12 @@ function readUpgrade(
     throw new GameError('max level');
   }
   for (const [power, value] of Object.entries(powers)) {
-    const required = POWER_INFO[power]?.level[value - 1];
+    const required = powerInfo[power]?.level[value - 1];
     if (value !== 0 && required !== undefined && newLevel < required) {
       throw new GameError(`not enough level for power ${power}`);
     }
   }
-  if (!powersAreValid(powers)) {
+  if (!powersAreValid(C, powers)) {
     throw new GameError('powers set is not valid');
   }
   return powers;
@@ -181,13 +189,15 @@ export function createPowerCreep(
   userId: string,
   input: CreatePowerCreepInput,
 ): PowerCreepDoc {
+  const C = worldConstants(state.world);
   const user = gameUser(state.world, userId);
   const creeps = userPowerCreeps(state.world, userId);
-  if (freePowerLevels(user, creeps) <= 0) {
+  if (freePowerLevels(C, user, creeps) <= 0) {
     throw new GameError('not enough power level');
   }
   const { className } = input;
-  if (className === undefined || !POWER_CLASSES.includes(className)) {
+  const powerClasses: readonly string[] = Object.values(C.POWER_CLASS);
+  if (className === undefined || !powerClasses.includes(className)) {
     throw new GameError('invalid class');
   }
   const name = String(input.name).substring(0, 50);
@@ -228,7 +238,7 @@ export function deletePowerCreep(game: GameOperationContext, userId: string, id?
   if ((user.powerExperimentationTime || 0) > now) {
     Reflect.deleteProperty(world.userPowerCreeps, creep._id);
   } else {
-    creep.deleteTime = now + C.POWER_CREEP_DELETE_COOLDOWN;
+    creep.deleteTime = now + worldConstants(world).POWER_CREEP_DELETE_COOLDOWN;
   }
 }
 
@@ -247,12 +257,13 @@ export function upgradePowerCreep(
   input: UpgradePowerCreepInput,
 ): void {
   const { world } = state;
+  const C = worldConstants(world);
   const user = gameUser(world, userId);
   const creeps = userPowerCreeps(world, userId);
   const creep = ownPowerCreep(world, userId, input.id);
-  const powers = readUpgrade(creep, input.powers);
+  const powers = readUpgrade(C, creep, input.powers);
   const level = Object.values(powers).reduce((sum, value) => sum + value, 0);
-  if (freePowerLevels(user, creeps) < level - creep.level) {
+  if (freePowerLevels(C, user, creeps) < level - creep.level) {
     throw new GameError('not enough power level');
   }
   const hitsMax = 1000 * (level + 1);

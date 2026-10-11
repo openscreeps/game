@@ -1,10 +1,9 @@
-import { constants as C, recordRoomObjectWrites, type WorldState } from '@openscreeps/engine';
+import { recordRoomObjectWrites, worldConstants, type WorldState } from '@openscreeps/engine';
 import { GameError, newId, type RoomObject } from '../contracts.ts';
 import { activateRoom, roomObjectsOf, storageIndexOrder } from '../world/rooms.ts';
 import { checkConstructionSpot } from './construction.ts';
 import {
   checkGameRoom,
-  CONSTRUCTION_COST,
   gameUser,
   isRoomCoordinate,
   roomController,
@@ -57,6 +56,7 @@ export function placeSpawn(
 ): RoomObject {
   const { state } = game;
   const { world } = state;
+  const C = worldConstants(world);
   const { x, y, name } = input;
   if (!isRoomCoordinate(x) || !isRoomCoordinate(y) || (name !== undefined && name.length > 50)) {
     throw new GameError('invalid params');
@@ -87,7 +87,7 @@ export function placeSpawn(
     }
   }
   // ruins are inserted in the order the storage returns the structures (room index)
-  const structures = owned.filter((object) => Object.hasOwn(CONSTRUCTION_COST, object.type));
+  const structures = owned.filter((object) => Object.hasOwn(C.CONSTRUCTION_COST, object.type));
   for (const id of storageIndexOrder(world, structures)) {
     const object = world.roomObjects[id] as RoomObject;
     const ruinId = newId(state);

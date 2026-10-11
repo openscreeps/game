@@ -7,9 +7,9 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
-  constants as C,
   recordRoomObjectWrite,
   recordRoomObjectWrites,
+  worldConstants,
   type CodeModules,
   type WorldState,
 } from '@openscreeps/engine';
@@ -306,6 +306,7 @@ export function spawnBot(
 ): { userId: string; username: string } {
   const { state } = context;
   const world = state.world;
+  const C = worldConstants(world);
   const random = new WorldRandom(world);
   const controller = Object.values(world.roomObjects).find(
     (o) => o.room === roomName && o.type === 'controller',
@@ -454,7 +455,7 @@ export function respawnUser(state: GameState, userId: string): void {
   const world = state.world;
   const systemUserId = ensureSystemUser(world);
   const gameTime = world.gameTime;
-  const structureTypes = new Set<string>(Object.keys(C.CONSTRUCTION_COST));
+  const structureTypes = new Set<string>(Object.keys(worldConstants(world).CONSTRUCTION_COST));
 
   for (const [id, creep] of Object.entries(world.userPowerCreeps)) {
     if (creep.user === userId) {

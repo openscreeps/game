@@ -38,6 +38,7 @@ export {
   isMaintenanceJobName,
   jobKey,
   MAINTENANCE_JOBS,
+  pruneJobs,
   runJob,
   runMaintenance,
 } from './maintenance.ts';
@@ -47,6 +48,7 @@ export type {
   MaintenanceJobName,
   MaintenanceReport,
   NotificationBatch,
+  NotificationDetail,
   NotificationRecipient,
 } from './maintenance.ts';
 export {

@@ -6,8 +6,11 @@
 import {
   BotRuntime,
   Simulation,
+  worldConstants,
   type BotRuntimeOptions,
   type CodeModules,
+  type Constants,
+  type SimulationOptions,
   type StoredUserIntents,
   type TickResult,
   type TickRunResult,
@@ -33,6 +36,12 @@ export interface GameTick {
   maintenance: MaintenanceReport;
 }
 
+/** Simulation options the session leaves to the host (it owns state sharing, clock and history). */
+export type SessionSimulationOptions = Omit<
+  SimulationOptions,
+  'stateOwnership' | 'now' | 'recordHistory' | 'constants'
+>;
+
 export interface GameSessionOptions<S extends GameState> {
   /** State the session adopts and mutates in place (never copied); see `GameSession.adopt`. */
   state: S;
@@ -43,9 +52,22 @@ export interface GameSessionOptions<S extends GameState> {
   /** History chunk length; one extra chunk is retained so complete chunks stay readable. */
   historyChunkSize?: number;
   /** Player runtime limits and mods. */
-  runtime?: Omit<BotRuntimeOptions, 'snapshot' | 'now'>;
+  runtime?: Omit<BotRuntimeOptions, 'snapshot' | 'now' | 'constants'>;
+  /** Simulation options such as processor hooks for server mods. */
+  simulation?: SessionSimulationOptions;
   /** Host account data consulted by maintenance (notification preferences). */
   hooks?: MaintenanceHooks;
+  /**
+   * Whether every tick first runs due maintenance (default `true`). Hosts that run maintenance on
+   * their own clock (upstream's one-second backend timer) pass `false`; ticks then report no jobs.
+   */
+  maintenance?: boolean;
+  /**
+   * The world's constants (server mods' `config.common.constants`, from `createConstants()`), used
+   * by the simulation, the player runtime and every game operation on the session's world. Default:
+   * the constants bound to `state.world` (see `createGameState`), else the upstream values.
+   */
+  constants?: Constants;
 }
 
 export interface AdoptOptions {
@@ -79,8 +101,11 @@ export class GameSession<S extends GameState = GameState> implements GameContext
   readonly #now: () => number;
   readonly #historyTicks: number;
   readonly #historyChunkSize: number;
-  readonly #runtimeOptions: Omit<BotRuntimeOptions, 'snapshot' | 'now'>;
+  readonly #runtimeOptions: Omit<BotRuntimeOptions, 'snapshot' | 'now' | 'constants'>;
+  readonly #simulationOptions: SessionSimulationOptions;
   readonly #hooks: MaintenanceHooks;
+  readonly #maintenance: boolean;
+  readonly #constants: Constants;
   #state: S;
   #runtime: BotRuntime;
   #simulation: Simulation;
@@ -93,7 +118,10 @@ export class GameSession<S extends GameState = GameState> implements GameContext
     this.#historyTicks = options.historyTicks ?? 0;
     this.#historyChunkSize = options.historyChunkSize ?? 0;
     this.#runtimeOptions = options.runtime ?? {};
+    this.#simulationOptions = options.simulation ?? {};
     this.#hooks = options.hooks ?? {};
+    this.#maintenance = options.maintenance ?? true;
+    this.#constants = options.constants ?? worldConstants(options.state.world);
     this.#state = options.state;
     this.#runtime = this.#createRuntime(options.state);
     this.#simulation = this.#createSimulation(options.state);
@@ -113,19 +141,31 @@ export class GameSession<S extends GameState = GameState> implements GameContext
   get ticking(): boolean {
     return this.#ticking;
   }
+  /** The world's constants object (shared by reference). */
+  get constants(): Constants {
+    return this.#constants;
+  }
   now(): number {
     return this.#now();
   }
 
   #createRuntime(state: S): BotRuntime {
-    return new BotRuntime({ ...this.#runtimeOptions, snapshot: state.runtime, now: this.#now });
+    return new BotRuntime({
+      ...this.#runtimeOptions,
+      snapshot: state.runtime,
+      now: this.#now,
+      constants: this.#constants,
+    });
   }
 
+  /** The simulation shares `state.world` and binds it to the session's constants. */
   #createSimulation(state: S): Simulation {
     return new Simulation(state.world, {
+      ...this.#simulationOptions,
       stateOwnership: 'shared',
       now: this.#now,
       recordHistory: this.#historyTicks > 0,
+      constants: this.#constants,
     });
   }
 
@@ -140,8 +180,9 @@ export class GameSession<S extends GameState = GameState> implements GameContext
   }
 
   /**
-   * Advances the world one tick: due maintenance jobs, a pending terrain refresh, every player's
-   * script, queued manual intents, the simulation, then history, statistics and leaderboard records.
+   * Advances the world one tick: due maintenance jobs (unless disabled), a pending terrain refresh,
+   * every player's script, queued manual intents, the simulation, then history, statistics and
+   * leaderboard records.
    */
   async tick(): Promise<GameTick> {
     this.#assertIdle();
@@ -156,7 +197,9 @@ export class GameSession<S extends GameState = GameState> implements GameContext
   async #tick(): Promise<GameTick> {
     const state = this.#state;
     const timestamp = this.#now();
-    const maintenance = runMaintenance(state, timestamp, this.#hooks);
+    const maintenance: MaintenanceReport = this.#maintenance
+      ? runMaintenance(state, timestamp, this.#hooks)
+      : { ran: [], errors: [], notifications: [] };
     if (this.#terrainDirty) {
       this.#simulation.refreshTerrain();
       this.#runtime.refreshTerrain();
@@ -176,7 +219,7 @@ export class GameSession<S extends GameState = GameState> implements GameContext
         }
       }
     }
-    const simulation = this.#simulation.tick(runtime.intents, state.pendingIntents);
+    const simulation = await this.#simulation.tickAsync(runtime.intents, state.pendingIntents);
     state.pendingIntents = {};
     state.pendingGlobalIntents = {};
     for (const [userId, result] of Object.entries(runtime.users)) {

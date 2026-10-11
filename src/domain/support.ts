@@ -1,13 +1,8 @@
-import { constants as C, type WorldState } from '@openscreeps/engine';
+import type { Constants, WorldState } from '@openscreeps/engine';
 import { GameError, type GameContext, type RoomObject, type User } from '../contracts.ts';
 
 /** What a gameplay operation needs from a game: its state and the wall clock. */
 export type GameOperationContext = Pick<GameContext, 'state' | 'now'>;
-
-export const CONSTRUCTION_COST: Readonly<Record<string, number>> = C.CONSTRUCTION_COST;
-export const CONTROLLER_STRUCTURES: Readonly<Record<string, Readonly<Record<number, number>>>> =
-  C.CONTROLLER_STRUCTURES;
-const COLORS: readonly number[] = C.COLORS_ALL;
 
 /** Own-property lookup that never resolves inherited members such as `__proto__` or `constructor`. */
 export function ownValue<T>(record: Readonly<Record<string, T>>, key: unknown): T | undefined {
@@ -19,8 +14,10 @@ export function isRoomCoordinate(value: number | undefined): value is number {
   return value !== undefined && Number.isInteger(value) && value >= 0 && value <= 49;
 }
 
-export function isFlagColor(value: unknown): value is number {
-  return typeof value === 'number' && COLORS.includes(value);
+/** A valid flag color of the world (`COLORS_ALL` of its constants). */
+export function isFlagColor(value: unknown, constants: Constants): value is number {
+  const colors: readonly number[] = constants.COLORS_ALL;
+  return typeof value === 'number' && colors.includes(value);
 }
 
 /** The world user an operation acts for. */

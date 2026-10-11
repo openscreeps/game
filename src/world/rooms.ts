@@ -37,11 +37,6 @@ export function isBus(coord: number): boolean {
   return sectorOffset(coord) === 0;
 }
 
-/** Object types that block a tile (`OBSTACLE_OBJECT_TYPES`). */
-export const OBSTACLE_TYPES: Readonly<Record<string, true>> = Object.fromEntries(
-  C.OBSTACLE_OBJECT_TYPES.map((type) => [type, true] as const),
-);
-
 /** Upstream `utils.isCenter`: one of the 3x3 source keeper rooms around the sector center. */
 export function isCenter(x: number, y: number): boolean {
   const ox = sectorOffset(x);

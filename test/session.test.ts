@@ -68,6 +68,37 @@ void describe('game session', () => {
     assert.ok(session.state.history[room]?.length);
   });
 
+  void it('leaves maintenance to hosts that schedule it and passes simulation hooks', async () => {
+    const state = createGameState({ size: 2, seed: 5, shardName: 'shard0' });
+    const rooms = new Set<string>();
+    const session = new GameSession({
+      state,
+      now: () => NOW,
+      maintenance: false,
+      simulation: {
+        hooks: {
+          processRoom: (scope) => {
+            rooms.add(scope.roomName);
+          },
+        },
+      },
+    });
+    try {
+      const room = Object.values(state.world.roomObjects).find(
+        (object) => object.type === 'controller',
+      )?.room;
+      assert.ok(room);
+      session.spawnBot('probe', { main: PROBE }, room);
+      const tick = await session.tick();
+      assert.deepEqual(tick.maintenance, { ran: [], errors: [], notifications: [] });
+      assert.equal(state.jobs['cron:sendNotifications'], undefined);
+      assert.ok(tick.simulation.processedRooms.includes(room));
+      assert.ok(rooms.has(room));
+    } finally {
+      session.dispose();
+    }
+  });
+
   void it('rejects state operations while a tick is in flight', async () => {
     const { session } = world();
     const pending = session.tick();

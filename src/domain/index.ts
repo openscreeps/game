@@ -78,8 +78,6 @@ export {
 } from './spawn.ts';
 export {
   checkGameRoom,
-  CONSTRUCTION_COST,
-  CONTROLLER_STRUCTURES,
   gameUser,
   hasTerrain,
   isFlagColor,

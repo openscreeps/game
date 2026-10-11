@@ -1,4 +1,4 @@
-import { constants as C, type WorldState } from '@openscreeps/engine';
+import { worldConstants, type WorldState } from '@openscreeps/engine';
 import { GameError, newId, type GameState } from '../contracts.ts';
 import { checkGameRoom, isFlagColor, type GameOperationContext } from './support.ts';
 
@@ -99,6 +99,7 @@ export function createFlag(
   input: CreateFlagInput,
 ): void {
   const { state } = game;
+  const C = worldConstants(state.world);
   const { x, y, name, color, secondaryColor } = input;
   if (
     typeof x !== 'number' ||
@@ -109,8 +110,8 @@ export function createFlag(
     y > 49 ||
     name === undefined ||
     name.length > 60 ||
-    !isFlagColor(color) ||
-    !isFlagColor(secondaryColor)
+    !isFlagColor(color, C) ||
+    !isFlagColor(secondaryColor, C)
   ) {
     throw new GameError('invalid params');
   }
@@ -165,7 +166,8 @@ export function changeFlagColor(
   input: ChangeFlagColorInput,
 ): void {
   const { room, name, color, secondaryColor } = input;
-  if (!isFlagColor(color) || !isFlagColor(secondaryColor)) {
+  const C = worldConstants(state.world);
+  if (!isFlagColor(color, C) || !isFlagColor(secondaryColor, C)) {
     throw new GameError('invalid params');
   }
   if (!room) {

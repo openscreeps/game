@@ -1,10 +1,8 @@
-import { constants as C, type WorldState } from '@openscreeps/engine';
+import { constants as C, worldConstants, type WorldState } from '@openscreeps/engine';
 import { GameError, newId, type RoomObject } from '../contracts.ts';
 import { activateRoom, roomObjectsOf } from '../world/rooms.ts';
 import {
   checkGameRoom,
-  CONSTRUCTION_COST,
-  CONTROLLER_STRUCTURES,
   hasTerrain,
   isRoomCoordinate,
   ownValue,
@@ -128,7 +126,9 @@ function checkConstructionController(
       object.type === structureType ||
       (object.type === 'constructionSite' && object.structureType === structureType),
   ).length;
-  const available = ownValue(CONTROLLER_STRUCTURES, structureType)?.[rcl];
+  const controllerStructures: Readonly<Record<string, Readonly<Record<number, number>>>> =
+    worldConstants(world).CONTROLLER_STRUCTURES;
+  const available = ownValue(controllerStructures, structureType)?.[rcl];
   if (available === undefined || count >= available) {
     throw new GameError('RCL not enough');
   }
@@ -142,12 +142,14 @@ export function createConstructionSite(
 ): RoomObject {
   const { state } = game;
   const { world } = state;
+  const C = worldConstants(world);
+  const constructionCost: Readonly<Record<string, number>> = C.CONSTRUCTION_COST;
   const { x, y, structureType, name } = input;
   if (
     !isRoomCoordinate(x) ||
     !isRoomCoordinate(y) ||
     structureType === undefined ||
-    !Object.hasOwn(CONSTRUCTION_COST, structureType) ||
+    !Object.hasOwn(constructionCost, structureType) ||
     (name !== undefined && name.length > 50) ||
     (structureType === 'spawn' && !name)
   ) {
@@ -156,7 +158,7 @@ export function createConstructionSite(
   const room = checkGameRoom(world, input.room, game.now());
   checkConstructionSpot(world, room, structureType, x, y);
   checkConstructionController(world, room, structureType, userId);
-  let progressTotal = CONSTRUCTION_COST[structureType] ?? 0;
+  let progressTotal = constructionCost[structureType] ?? 0;
   if (structureType === 'road') {
     const terrain = world.terrain[room] ?? '';
     if (hasTerrain(terrain, x, y, C.TERRAIN_MASK_SWAMP)) {

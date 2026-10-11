@@ -5,10 +5,36 @@ export {
   createWorldState,
   recordRoomObjectWrite,
   recordRoomObjectWrites,
+  assertSupportedConstants,
+  bindWorldConstants,
+  createConstants,
+  worldConstants,
+  ProcessorPool,
+  RunnerPool,
+  strongholds,
+  utils,
 } from '@openscreeps/engine';
-export type { CodeModules, UserRunResult, WorldState } from '@openscreeps/engine';
+export type {
+  BotRuntimeOptions,
+  CodeModules,
+  CustomObjectPrototypeConfig,
+  Constants,
+  WorkerEvent,
+  WorkerHost,
+  WorkerSetup,
+  WorkerHostCall,
+  SimulationHooks,
+  SimulationOptions,
+  UserRunResult,
+  WorldState,
+} from '@openscreeps/engine';
 export { GameSession } from './session.ts';
-export type { AdoptOptions, GameSessionOptions, GameTick } from './session.ts';
+export type {
+  AdoptOptions,
+  GameSessionOptions,
+  GameTick,
+  SessionSimulationOptions,
+} from './session.ts';
 export { createGameState, gameStateOf, parseGameState } from './state.ts';
 export { GameError, newId } from './contracts.ts';
 export type {
