@@ -4,36 +4,45 @@
  * passes over evolving state (clock and game time advanced between passes).
  */
 
+import type { Document, Dump, Projection, Scenario, Step } from '../types.ts';
+
 import {
   cron,
   DAY,
   docs,
   driverAccessibleRooms,
+  isDocument,
   find,
+  requiredDoc,
   setActiveRooms,
   setGameTime,
   USERS,
-} from './support.mjs';
+} from './support.ts';
 
 const NOW = Date.UTC(2026, 0, 15, 12, 0, 0);
 const MINUTE = 60 * 1000;
 
-function setHarvested(dump, room, amount) {
+function setHarvested(dump: Dump, room: string, amount: number): void {
   for (const source of find(dump, 'rooms.objects', (o) => o.room === room && o.type === 'source')) {
     source.invaderHarvested = amount;
   }
 }
 
-const notified = (outcome, side) => {
+const notified: Projection = (outcome, side) => {
   if (!outcome.ok) return { error: outcome.error };
-  const list =
-    side === 'upstream'
-      ? outcome.value.map((n) => ({ user: n.user, count: n.notifications.length }))
-      : outcome.value.map((n) => ({ user: n.userId, count: n.messages.length }));
+  if (!Array.isArray(outcome.value)) throw new TypeError('Expected notification batches');
+  const list = outcome.value.map((entry: unknown) => {
+    if (!isDocument(entry)) throw new TypeError('Expected a notification batch');
+    const user = side === 'upstream' ? entry.user : entry.userId;
+    const messages = side === 'upstream' ? entry.notifications : entry.messages;
+    if (typeof user !== 'string' || !Array.isArray(messages))
+      throw new TypeError('Expected a notification user and messages');
+    return { user, count: messages.length };
+  });
   return { ok: list.sort((a, b) => (a.user < b.user ? -1 : 1)) };
 };
 
-function sendNotifications() {
+function sendNotifications(): Step {
   return {
     op: 'system.runCronjob("sendNotifications")',
     upstream: async (o) => {
@@ -47,7 +56,7 @@ function sendNotifications() {
   };
 }
 
-function powerCreep(id, user, deleteTime) {
+function powerCreep(id: string, user: string, deleteTime?: number | null): Document {
   return {
     _id: id,
     user,
@@ -63,13 +72,14 @@ function powerCreep(id, user, deleteTime) {
   };
 }
 
-export default [
+// Required matches below are checked against the real storage fixture and scenario setup.
+const scenarios: Scenario[] = [
   {
     name: 'maintenance.roomsForceUpdate',
     covers: ['cronjobs.roomsForceUpdate'],
     setup(dump) {
-      find(dump, 'rooms', (r) => r._id === 'W2N3')[0].status = 'out of borders';
-      delete find(dump, 'rooms', (r) => r._id === 'W7N7')[0].nextForceUpdateTime;
+      requiredDoc(dump, 'rooms', (r) => r._id === 'W2N3').status = 'out of borders';
+      delete requiredDoc(dump, 'rooms', (r) => r._id === 'W7N7').nextForceUpdateTime;
     },
     steps: [
       cron('roomsForceUpdate'),
@@ -88,8 +98,8 @@ export default [
     name: 'maintenance.genPowerBanks',
     covers: ['cronjobs.genPowerBanks'],
     setup(dump) {
-      find(dump, 'rooms', (r) => r._id === 'W10N3')[0].status = 'out of borders';
-      delete find(dump, 'rooms', (r) => r._id === 'W10N6')[0].powerBankTime;
+      requiredDoc(dump, 'rooms', (r) => r._id === 'W10N3').status = 'out of borders';
+      delete requiredDoc(dump, 'rooms', (r) => r._id === 'W10N6').powerBankTime;
     },
     steps: [
       cron('genPowerBanks'),
@@ -109,8 +119,8 @@ export default [
         for (let x = 0; x < 50; x++)
           terrain += x >= 24 && x <= 26 && y >= 24 && y <= 26 ? '0' : '1';
       }
-      find(dump, 'rooms.terrain', (t) => t.room === 'W10N5')[0].terrain = terrain;
-      find(dump, 'rooms', (r) => r._id === 'W10N5')[0].powerBankTime = 1;
+      requiredDoc(dump, 'rooms.terrain', (t) => t.room === 'W10N5').terrain = terrain;
+      requiredDoc(dump, 'rooms', (r) => r._id === 'W10N5').powerBankTime = 1;
       const objects = docs(dump, 'rooms.objects');
       for (let y = 23; y <= 27; y++) {
         for (let x = 23; x <= 27; x++) {
@@ -151,15 +161,15 @@ export default [
       setHarvested(dump, 'W6N5', C.INVADERS_ENERGY_GOAL);
       setHarvested(dump, 'W1N1', 2000000);
       setHarvested(dump, 'W3N3', 10);
-      find(dump, 'rooms', (r) => r._id === 'W8N8')[0].invaderGoal = 1;
-      find(dump, 'rooms', (r) => r._id === 'W7N2')[0].invaderGoal = 500;
+      requiredDoc(dump, 'rooms', (r) => r._id === 'W8N8').invaderGoal = 1;
+      requiredDoc(dump, 'rooms', (r) => r._id === 'W7N2').invaderGoal = 500;
       setHarvested(dump, 'W7N2', 600);
       // big raid: an owned RCL 7 controller
-      const controller = find(
+      const controller = requiredDoc(
         dump,
         'rooms.objects',
         (o) => o.room === 'W3N7' && o.type === 'controller',
-      )[0];
+      );
       Object.assign(controller, { user: USERS.alice, level: 7 });
       setHarvested(dump, 'W3N7', C.INVADERS_ENERGY_GOAL);
     },
@@ -171,7 +181,8 @@ export default [
           await setActiveRooms(s, []);
           await s.oracle.db['rooms.objects'].removeWhere({ type: 'creep', user: '2' });
           for (const [id, o] of Object.entries(s.local.state.world.roomObjects)) {
-            if (o.type === 'creep' && o.user === '2') delete s.local.state.world.roomObjects[id];
+            if (o.type === 'creep' && o.user === '2')
+              Reflect.deleteProperty(s.local.state.world.roomObjects, id);
           }
         },
       }),
@@ -237,7 +248,7 @@ export default [
         user: USERS.emma,
         store: {},
       });
-      find(dump, 'rooms', (r) => r._id === 'W10N0')[0].status = 'out of borders';
+      requiredDoc(dump, 'rooms', (r) => r._id === 'W10N0').status = 'out of borders';
       docs(dump, 'market.orders').push({
         _id: 'playerorder1',
         created: 1,
@@ -264,7 +275,7 @@ export default [
     covers: ['cronjobs.calcMarketStats'],
     setup(dump) {
       const money = docs(dump, 'users.money');
-      const entries = [
+      const entries: [daysAgo: number, resourceType: string, amount: number, price: number][] = [
         [1, 'H', 100, 2000],
         [1, 'H', 50, 2600],
         [1, 'energy', 1000, 10],
@@ -320,10 +331,9 @@ export default [
     name: 'maintenance.deletePowerCreeps',
     covers: ['cronjobs.deletePowerCreeps'],
     setup(dump) {
-      const users = docs(dump, 'users');
-      users.find((u) => u._id === USERS.emma).power = 25000000;
-      users.find((u) => u._id === USERS.michael).power = 1500;
-      users.find((u) => u._id === USERS.alice).power = 4000000;
+      requiredDoc(dump, 'users', (u) => u._id === USERS.emma).power = 25000000;
+      requiredDoc(dump, 'users', (u) => u._id === USERS.michael).power = 1500;
+      requiredDoc(dump, 'users', (u) => u._id === USERS.alice).power = 4000000;
       const creeps = docs(dump, 'users.power_creeps');
       creeps.push(powerCreep('pcexpired', USERS.emma, NOW - 1000));
       creeps.push(powerCreep('pclater', USERS.emma, NOW + 60 * MINUTE));
@@ -337,15 +347,14 @@ export default [
     name: 'maintenance.sendNotifications',
     covers: ['cronjobs.sendNotifications'],
     setup(dump) {
-      const users = docs(dump, 'users');
-      users.find((u) => u._id === USERS.emma).email = 'emma@example.test';
+      requiredDoc(dump, 'users', (u) => u._id === USERS.emma).email = 'emma@example.test';
       Object.assign(
-        users.find((u) => u._id === USERS.alice),
+        requiredDoc(dump, 'users', (u) => u._id === USERS.alice),
         { email: 'alice@example.test', notifyPrefs: { disabled: true } },
       );
-      users.find((u) => u._id === USERS.jack).notifyPrefs = { interval: 5 };
+      requiredDoc(dump, 'users', (u) => u._id === USERS.jack).notifyPrefs = { interval: 5 };
       Object.assign(
-        users.find((u) => u._id === USERS.michael),
+        requiredDoc(dump, 'users', (u) => u._id === USERS.michael),
         {
           email: 'michael@example.test',
           lastNotifyDate: NOW - 10 * MINUTE,
@@ -353,7 +362,7 @@ export default [
         },
       );
       const list = docs(dump, 'users.notifications');
-      const add = (id, user, date, message) =>
+      const add = (id: string, user: string, date: number, message: string) =>
         list.push({ _id: id, user, message, date, type: 'msg', count: 1 });
       add('n1', USERS.emma, NOW - MINUTE, 'one');
       add('n2', USERS.emma, NOW - 2 * MINUTE, 'two');
@@ -373,7 +382,7 @@ export default [
     name: 'maintenance.genDeposits',
     covers: ['cronjobs.genDeposits'],
     setup(dump) {
-      find(dump, 'rooms.objects', (o) => o.type === 'deposit')[0].harvested = 100000;
+      requiredDoc(dump, 'rooms.objects', (o) => o.type === 'deposit').harvested = 100000;
       // a second sector center (two-digit name) next to the original world
       docs(dump, 'rooms').push({
         _id: 'W15N5',
@@ -381,7 +390,7 @@ export default [
         sourceKeepers: false,
         bus: false,
       });
-      const terrain = find(dump, 'rooms.terrain', (t) => t.room === 'W5N5')[0].terrain;
+      const terrain = requiredDoc(dump, 'rooms.terrain', (t) => t.room === 'W5N5').terrain;
       docs(dump, 'rooms.terrain').push({ _id: 'fixtureterrainW15N5', room: 'W15N5', terrain });
     },
     steps: [
@@ -450,3 +459,5 @@ export default [
     steps: [cron('nope')],
   },
 ];
+
+export default scenarios;

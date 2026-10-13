@@ -5,6 +5,18 @@ common and LokiJS storage revisions are pinned in `reference-versions.json`.
 Reports contain reference revisions, the local source state, exercised operations,
 random-draw alignment, field-level differences and exclusions.
 
+Unit tests and all owned conformance runners, scenarios, setup and adapters are
+TypeScript, included in `npm run typecheck`, and run directly with Node 24's native
+type stripping. The original pinned JavaScript packages still execute unmodified
+through explicit CommonJS `createRequire` boundaries. Bot source fixtures remain
+JavaScript because that is the code being exercised.
+
+Session tests clone one deterministically generated initial state rather than
+regenerating it per case; sessions, runtime heaps and mutable state remain
+independent. Conformance comparisons short-circuit deeply equal values before
+canonical JSON sorting/serialization, retaining the full comparison and every
+scenario. Both suites keep their existing process isolation and scenario order.
+
 ## Policy
 
 Preserve safety and existing completed functionality; match ordinary gameplay
@@ -16,7 +28,7 @@ runner. A passing run is not a claim of full standalone or private-MMO parity.
 
 ## Coverage and results
 
-`node conformance/backend.mjs` runs 66 scenarios (499 steps). They cover world
+`node conformance/backend.ts` runs 66 scenarios (499 steps). They cover world
 generation and room operations, all 11 cron jobs, bots/respawn/strongholds, and
 the original `game.js`, `power-creeps.js`, `market.js` and `user.js` routes
 that have a game equivalent. Current tree: 480 steps match, 19 steps are named
@@ -94,7 +106,7 @@ Each divergence is asserted on both sides only for the listed fields and steps.
 | `respawn-unrelated-room-status`      | safety         | Original respawnUser reopens every room → local resets only the player's own rooms (only `.status` excluded).                     | `npc.respawn` 1-2                          | [game#14](https://github.com/openscreeps/game/issues/14) |
 | `bot-username-case-insensitive`      | safety         | Original creates `testbot` next to `TestBot` → local rejects it.                                                                  | `npc.bots.username-case` 2                 | [game#14](https://github.com/openscreeps/game/issues/14) |
 
-Pass the reproduction options to `node conformance/backend.mjs`. Issues record
+Pass the reproduction options to `node conformance/backend.ts`. Issues record
 fix and publication status; original before-output was captured before source
 edits. Storage-generated identifiers are mapped between equivalent new documents,
 Loki bookkeeping is removed, and active rooms use set semantics. Semantic world

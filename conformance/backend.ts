@@ -7,7 +7,7 @@
  * Prerequisites: `npm run conformance:setup` (clones the pinned references and installs their
  * locked JavaScript dependencies with `npm ci --ignore-scripts`). Node >= 24 (type stripping).
  *
- * Usage: node conformance/backend.mjs [--scenario <name-or-prefix>]... [--out <file>] [--list]
+ * Usage: node conformance/backend.ts [--scenario <name-or-prefix>]... [--out <file>] [--list]
  *        [--local-root <dir>]
  * `--local-root` loads `<dir>/src/index.ts` instead of this checkout's `src` (for example an
  * extracted older revision: `git archive <rev> src | tar -x -C .reference/game-<rev>`; module
@@ -20,31 +20,40 @@ import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { verifyReferences, referenceRoot } from './references.mjs';
-import { installControls } from './backend/controls.mjs';
-import { HOST_USER_FIELDS, loadLocal } from './backend/local.mjs';
-import { createOracle } from './backend/oracle.mjs';
-import { runScenario } from './backend/run.mjs';
-import { scenarios } from './backend/scenarios/index.mjs';
-import { UNSUPPORTED } from './backend/unsupported.mjs';
+import { verifyReferences, referenceRoot } from './references.ts';
+import { installControls } from './backend/controls.ts';
+import { HOST_USER_FIELDS, loadLocal } from './backend/local.ts';
+import { createOracle } from './backend/oracle.ts';
+import { runScenario } from './backend/run.ts';
+import { scenarios } from './backend/scenarios/index.ts';
+import { UNSUPPORTED } from './backend/unsupported.ts';
+import type { ScenarioReport, StepReport } from './backend/run.ts';
 
-const REFERENCES = ['backend', 'common', 'storage'];
+const REFERENCES = ['backend', 'common', 'storage'] as const;
 const gameRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-function parseArgs(argv) {
-  const options = { scenarios: [], out: undefined, list: false, localRoot: gameRoot };
+function parseArgs(argv: string[]) {
+  const options: {
+    scenarios: string[];
+    out: string | undefined;
+    list: boolean;
+    localRoot: string;
+  } = { scenarios: [], out: undefined, list: false, localRoot: gameRoot };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === '--scenario') options.scenarios.push(argv[++i]);
-    else if (arg === '--out') options.out = argv[++i];
-    else if (arg === '--list') options.list = true;
-    else if (arg === '--local-root') options.localRoot = resolve(argv[++i]);
-    else throw new Error(`unknown argument ${arg}`);
+    if (arg === '--list') options.list = true;
+    else if (arg === '--scenario' || arg === '--out' || arg === '--local-root') {
+      const value = argv[++i];
+      if (value === undefined) throw new Error(`missing value for ${arg}`);
+      if (arg === '--scenario') options.scenarios.push(value);
+      else if (arg === '--out') options.out = value;
+      else options.localRoot = resolve(value);
+    } else throw new Error(`unknown argument ${String(arg)}`);
   }
   return options;
 }
 
-function git(cwd, args) {
+function git(cwd: string, args: string[]) {
   try {
     return execFileSync('git', args, {
       cwd,
@@ -75,7 +84,7 @@ async function main() {
   );
 
   // upstream code logs freely; keep stdout for the report
-  const log = (...args) => process.stderr.write(`${args.map(String).join(' ')}\n`);
+  const log = (...args: unknown[]) => process.stderr.write(`${args.map(String).join(' ')}\n`);
   console.log = log;
   console.info = log;
   console.warn = log;
@@ -84,13 +93,17 @@ async function main() {
   const { game, WorldRandom } = await loadLocal(options.localRoot);
   const controls = installControls(WorldRandom);
   const oracle = await createOracle({
-    roots: Object.fromEntries(REFERENCES.map((name) => [name, resolve(referenceRoot, name)])),
+    roots: {
+      backend: resolve(referenceRoot, 'backend'),
+      common: resolve(referenceRoot, 'common'),
+      storage: resolve(referenceRoot, 'storage'),
+    },
     controls,
     log,
   });
   const base = oracle.initial;
 
-  const results = [];
+  const results: ScenarioReport[] = [];
   for (const scenario of selected) {
     log(`scenario ${scenario.name}`);
     try {
@@ -99,15 +112,15 @@ async function main() {
       results.push({
         scenario: scenario.name,
         status: 'error',
-        error: String(error?.stack ?? error),
+        error: error instanceof Error ? (error.stack ?? String(error)) : String(error),
       });
     }
   }
   oracle.close();
 
   const steps = results.flatMap((r) => r.steps ?? []);
-  const count = (status) => steps.filter((s) => s.status === status).length;
-  const covered = {};
+  const count = (status: StepReport['status']) => steps.filter((s) => s.status === status).length;
+  const covered: Record<string, number> = {};
   for (const scenario of selected)
     for (const op of scenario.covers ?? []) covered[op] = (covered[op] ?? 0) + 1;
   const report = {
@@ -158,15 +171,21 @@ async function main() {
   };
   const text = `${JSON.stringify(report, null, 2)}\n`;
   if (options.out) writeFileSync(options.out, text);
-  await new Promise((done) => process.stdout.write(text, done));
+  await new Promise<void>((done) =>
+    process.stdout.write(text, () => {
+      done();
+    }),
+  );
   const failed = report.summary.scenariosMismatching + report.summary.scenarioErrors > 0;
   return failed ? 1 : 0;
 }
 
 main().then(
   (code) => process.exit(code),
-  (error) => {
-    process.stderr.write(`${error?.stack ?? error}\n`);
+  (error: unknown) => {
+    process.stderr.write(
+      `${error instanceof Error ? (error.stack ?? String(error)) : String(error)}\n`,
+    );
     process.exit(2);
   },
 );

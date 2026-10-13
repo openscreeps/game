@@ -30,6 +30,10 @@ Git dependency and this package; no sibling engine checkout is required.
 `isolated-vm` requires a supported native binary or build toolchain.
 `npm run check` runs strict TypeScript, ESLint, formatting, behavioral tests and
 declaration compilation on the package.
+Tests and conformance helpers are checked TypeScript executed directly by Node.
+Session cases clone an independent baseline; full four-sector portal generation
+runs in its own test process alongside other world tests without reducing the map
+or its assertions.
 
 To verify an unpublished change in a sibling engine checkout without changing
 the portable Git dependency pin:
@@ -46,14 +50,14 @@ the dependency pin and lockfile are required before distributing it with the gam
 The engine's `examples/simulation-benchmark.ts` measures production-sized
 simulation workloads independently of player scripts and persistence.
 
-The package is currently distributed from Git, not the npm registry. Consumers
-should pin a full commit of `github:openscreeps/game` and approve its build script
-under their npm install-script policy. The `prepare` script builds distributable
-JavaScript and declarations when installed from Git.
 The engine pin is `d9c5a8f50d654273fa5e5645f05afca65e6c3274`, including
 accuracy-checked reductions in world scanning and runtime-index allocations.
 Maintenance, tick processing and storage ordering remain enabled and unchanged.
 
+The package is currently distributed from Git, not the npm registry. Consumers
+should pin a full commit of `github:openscreeps/game` and approve its build script
+under their npm install-script policy. The `prepare` script builds distributable
+JavaScript and declarations when installed from Git.
 
 ## Run a world
 
@@ -164,8 +168,8 @@ not substitute reimplemented game rules for the reference.
 For a focused reproduction and machine-readable report:
 
 ```sh
-node conformance/backend.mjs --list
-node conformance/backend.mjs --scenario world.generate.options --out .reference/report.json
+node conformance/backend.ts --list
+node conformance/backend.ts --scenario world.generate.options --out .reference/report.json
 ```
 
 Reports distinguish matching steps, unexpected differences, execution errors and

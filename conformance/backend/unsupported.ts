@@ -1,5 +1,5 @@
 /** Backend areas the differential runner does not compare, with the reason. */
-export const UNSUPPORTED = [
+export const UNSUPPORTED: { area: string; reason: string }[] = [
   {
     area: 'HTTP transport, express middleware, rate limits and response headers',
     reason:

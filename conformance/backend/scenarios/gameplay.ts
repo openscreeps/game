@@ -7,7 +7,64 @@
  * sides are compared on the same wire-level values.
  */
 
-import { route } from './api.mjs';
+import { route } from './api.ts';
+import type { RouteOptions } from './api.ts';
+import { requiredDocs } from './support.ts';
+import type { CloneBranchOptions } from '../../../src/code.ts';
+import type {
+  Document,
+  Dump,
+  Divergence,
+  Side,
+  Step,
+  Scenario,
+  Projection,
+  View,
+} from '../types.ts';
+
+type RawInput = Record<string, unknown>;
+interface PowerInput extends RawInput {
+  powers?: Record<string, unknown> | undefined;
+}
+type StepOptions = Pick<RouteOptions, 'before' | 'expected' | 'op'>;
+type ForeignIntentCase = [
+  target: string,
+  room: string,
+  name: string,
+  intent: unknown,
+  error: string,
+];
+type MalformedIntentCase = [target: string, name: string, intent: unknown];
+interface IntentDocument extends Document {
+  users?: Record<string, { objectsManual?: Record<string, Record<string, unknown>> }>;
+}
+interface PowerDocument extends Document {
+  _id: string;
+  name: string;
+  powers?: Record<string, { level: number }>;
+}
+interface BranchDocument extends Document {
+  branch: string;
+}
+interface MapStatsResponse extends Document {
+  users?: Record<string, unknown>;
+  stats: Record<string, Document>;
+  statsMax: Record<string, number>;
+}
+interface OverviewResponse extends Document {
+  owner?: { username?: string } | null;
+  stats: Record<string, unknown[]>;
+}
+interface ProjectedResult<T> {
+  ok?: T | null;
+  error?: unknown;
+}
+interface DivergenceOptions<R> {
+  covers?: Divergence['covers'];
+  coversResult?: boolean;
+  upstream: (view: View, result: R) => boolean;
+  local: (view: View, result: R) => boolean;
+}
 
 const EMMA = '17c332744f825c7'; // EmmaBot, owns W1N1 (RCL 1) in the original default world
 const MICHAEL = 'a1123272b261687'; // MichaelBot, owns W9N9
@@ -18,7 +75,6 @@ const MICHAEL_SPAWN = '092c3272b2c03f7';
 const W2N2_CONTROLLER = '21ee0774a5bbeb0';
 const W3N3_CONTROLLER = '292807742d07fd0';
 const W2N1_CONTROLLER = 'cccc0774ad79184';
-const W5N5_EXTRACTOR = 'a9de61653eb4afd';
 
 /* Fixture users inserted by `setup` (ids in the storage's 15 hex digit format). */
 const NEWBIE = 'b00000000000001';
@@ -45,7 +101,7 @@ const MAP_STATS_FIELDS = [
 
 /* ---------------------------------------------------------------- fixtures (raw storage docs) */
 
-function user(_id, username, fields = {}) {
+function user(_id: string, username: string, fields: Document = {}): Document {
   return {
     _id,
     username,
@@ -66,58 +122,72 @@ function user(_id, username, fields = {}) {
   };
 }
 
-function addDocs(dump, collection, docs) {
+function addDocs(dump: Dump, collection: string, docs: Document[]): void {
   (dump.collections[collection] ??= []).push(...docs.map((doc) => structuredClone(doc)));
 }
 
-function patch(dump, collection, id, fields) {
-  const doc = dump.collections[collection].find((d) => d._id === id);
+function patch(dump: Dump, collection: string, id: string, fields: Document): void {
+  const doc = dump.collections[collection]?.find((d) => d._id === id);
   if (!doc) throw new Error(`fixture: no ${collection} ${id}`);
   for (const [key, value] of Object.entries(fields)) {
-    if (value === undefined) delete doc[key];
+    if (value === undefined) Reflect.deleteProperty(doc, key);
     else doc[key] = value;
   }
 }
 
 /* ---------------------------------------------------------------- request decoding (host side) */
 
-const str = (value) => (typeof value === 'string' ? value : undefined);
-const num = (value) => (typeof value === 'number' ? value : undefined);
-function int(value) {
+const str = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined);
+const num = (value: unknown): number | undefined => (typeof value === 'number' ? value : undefined);
+function int(value: unknown): number {
   if (typeof value === 'number') return Number.isFinite(value) ? Math.trunc(value) : Number.NaN;
   if (typeof value === 'string') return Number.parseInt(value, 10);
   return Number.NaN;
 }
 
 /** Storage bookkeeping the original RPC returns with every document. */
-function doc(value) {
-  if (!value || typeof value !== 'object') return value;
-  const { meta, $loki, ...rest } = value;
-  void meta;
-  void $loki;
+function doc<T extends Document>(value: T): T {
+  const { ...rest } = value;
+  Reflect.deleteProperty(rest, 'meta');
+  Reflect.deleteProperty(rest, '$loki');
+  // Removing storage bookkeeping preserves all route-visible fields of the declared document.
   return rest;
 }
 
 /** Drop the (storage- vs. game-generated) `_id` of a document created by the step. */
-function created(value) {
+function created<T extends Document>(
+  value: T,
+): {
+  [K in keyof T]: K extends '_id' ? unknown : T[K];
+} {
   const { _id, ...rest } = doc(value);
-  return { ...rest, _id: typeof _id === 'string' ? 'new id' : _id };
+  // Only the id changes type; every other projected field keeps its original contract.
+  return { ...rest, _id: typeof _id === 'string' ? 'new id' : _id } as {
+    [K in keyof T]: K extends '_id' ? unknown : T[K];
+  };
 }
 
-const body = (keys) => (data) => Object.fromEntries(keys.map((key) => [key, data[key] ?? null]));
+const body =
+  (keys: string[]): ((data: Document) => Document) =>
+  (data) =>
+    Object.fromEntries(keys.map((key) => [key, data[key] ?? null]));
 
 /* ---------------------------------------------------------------- route steps */
 
-const game = (method, path, options) => route('game', method, path, options);
-const power = (method, path, options) => route('powerCreeps', method, path, options);
-const market = (method, path, options) => route('market', method, path, options);
-const userRoute = (method, path, options) => route('user', method, path, options);
+const game = (method: string, path: string, options: RouteOptions): Step =>
+  route('game', method, path, options);
+const power = (method: string, path: string, options: RouteOptions): Step =>
+  route('powerCreeps', method, path, options);
+const market = (method: string, path: string, options: RouteOptions): Step =>
+  route('market', method, path, options);
+const userRoute = (method: string, path: string, options: RouteOptions): Step =>
+  route('user', method, path, options);
 
-function createFlag(userId, input) {
+function createFlag(userId: string, input: RawInput): Step {
   return game('post', '/create-flag', {
     user: userId,
     body: input,
-    local: (l, g) =>
+    local: (l, g) => {
       g.createFlag(l.context, userId, {
         room: str(input.room),
         x: num(input.x),
@@ -125,11 +195,12 @@ function createFlag(userId, input) {
         name: str(input.name),
         color: num(input.color),
         secondaryColor: num(input.secondaryColor),
-      }),
+      });
+    },
   });
 }
 
-function genFlagName(userId) {
+function genFlagName(userId: string): Step {
   return game('post', '/gen-unique-flag-name', {
     user: userId,
     local: (l, g) => ({ name: g.uniqueFlagName(l.state.world, userId) }),
@@ -137,38 +208,42 @@ function genFlagName(userId) {
   });
 }
 
-function checkFlagName(userId, name) {
+function checkFlagName(userId: string, name: unknown): Step {
   return game('post', '/check-unique-flag-name', {
     user: userId,
     body: { name },
-    local: (l, g) => g.checkUniqueFlagName(l.state.world, userId, str(name)),
+    local: (l, g) => {
+      g.checkUniqueFlagName(l.state.world, userId, str(name));
+    },
   });
 }
 
-function changeFlagColor(userId, input) {
+function changeFlagColor(userId: string, input: RawInput): Step {
   return game('post', '/change-flag-color', {
     user: userId,
     body: input,
-    local: (l, g) =>
+    local: (l, g) => {
       g.changeFlagColor(l.state, userId, {
         room: str(input.room),
         name: str(input.name),
         color: num(input.color),
         secondaryColor: num(input.secondaryColor),
-      }),
+      });
+    },
   });
 }
 
-function removeFlag(userId, input) {
+function removeFlag(userId: string, input: RawInput): Step {
   return game('post', '/remove-flag', {
     user: userId,
     body: input,
-    local: (l, g) =>
-      g.removeFlag(l.state, userId, { room: str(input.room), name: str(input.name) }),
+    local: (l, g) => {
+      g.removeFlag(l.state, userId, { room: str(input.room), name: str(input.name) });
+    },
   });
 }
 
-function construct(userId, input, options = {}) {
+function construct(userId: string, input: RawInput, options: StepOptions = {}): Step {
   return game('post', '/create-construction', {
     user: userId,
     body: input,
@@ -188,7 +263,7 @@ function construct(userId, input, options = {}) {
   });
 }
 
-function placeSpawn(userId, input) {
+function placeSpawn(userId: string, input: RawInput): Step {
   return game('post', '/place-spawn', {
     user: userId,
     body: input,
@@ -205,46 +280,48 @@ function placeSpawn(userId, input) {
   });
 }
 
-function objectIntent(userId, input, options = {}) {
+function objectIntent(userId: string, input: RawInput, options: StepOptions = {}): Step {
   return game('post', '/add-object-intent', {
     user: userId,
     body: input,
     ...options,
-    local: (l, g) =>
+    local: (l, g) => {
       g.addObjectIntent(l.context, userId, {
         room: str(input.room),
         targetId: str(input._id),
         name: str(input.name),
         intent: input.intent,
-      }),
+      });
+    },
   });
 }
 
-function globalIntent(userId, input) {
+function globalIntent(userId: string, input: RawInput): Step {
   return game('post', '/add-global-intent', {
     user: userId,
     body: input,
-    local: (l, g) =>
-      g.addGlobalIntent(l.state, userId, { name: str(input.name), intent: input.intent }),
+    local: (l, g) => {
+      g.addGlobalIntent(l.state, userId, { name: str(input.name), intent: input.intent });
+    },
   });
 }
 
 /** `apiResult` with a projection applied to both sides' response bodies. */
-function apiBody(project) {
+function apiBody(project: (data: Document, side: Side) => unknown): Projection {
   return (outcome, side) => {
     if (side === 'upstream') {
       if (!outcome.ok) return { error: `harness: ${outcome.error}` };
-      const { ok, error, ...data } = outcome.value ?? {};
-      void ok;
+      const { error, ...data } = Object(outcome.value ?? {}) as Document;
+      Reflect.deleteProperty(data, 'ok');
       if (error !== undefined) return { error };
       return { ok: project(data, side) ?? null };
     }
     if (!outcome.ok) return { error: outcome.error };
-    return { ok: project(outcome.value ?? {}, side) ?? null };
+    return { ok: project((outcome.value ?? {}) as Document, side) ?? null };
   };
 }
 
-function invader(input) {
+function invader(input: RawInput): Step {
   return game('post', '/create-invader', {
     user: EMMA,
     body: input,
@@ -264,23 +341,37 @@ function invader(input) {
 /* ---------------------------------------------------------------- named expected divergences */
 
 /** A narrow divergence whose assertions must hold on both sides' actual outputs. */
-function divergence(id, kind, reason, { covers, coversResult = false, upstream, local }) {
+function divergence<R = Document>(
+  id: string,
+  kind: string,
+  reason: string,
+  { covers, coversResult = false, upstream, local }: DivergenceOptions<R>,
+): Divergence {
   return {
     id,
     kind,
     reason,
     covers,
     coversResult,
-    assertUpstream: (view, result) => upstream(view, result) === true,
-    assertLocal: (view, result) => local(view, result) === true,
+    // Each predicate declares the result shape produced by its step's projection.
+    assertUpstream: (view, result) => upstream(view, result as R),
+    assertLocal: (view, result) => local(view, result as R),
   };
 }
 
-const queuedIntents = (view, room, userId) =>
-  view.collections['rooms.intents']?.find((d) => d.room === room)?.users?.[userId]?.objectsManual;
+const queuedIntents = (
+  view: View,
+  room: string,
+  userId: string,
+): Record<string, Record<string, unknown>> | undefined =>
+  (view.collections['rooms.intents']?.find((d) => d.room === room) as IntentDocument | undefined)
+    ?.users?.[userId]?.objectsManual;
 
 /** `targets`: `[target, room, ...]` of every foreign intent queued upstream so far. */
-function foreignIntent(targets, { target, room, error }) {
+function foreignIntent(
+  targets: ForeignIntentCase[],
+  { target, room, error }: { target: string; room: string; error: string },
+): Divergence {
   return divergence(
     'GP-D1 manual-intent-ownership',
     'safety',
@@ -292,7 +383,7 @@ function foreignIntent(targets, { target, room, error }) {
         targets.some(
           ([id, targetRoom]) =>
             diff.key === targetRoom &&
-            (String(diff.path ?? '').includes(`.objectsManual.${id}`) ||
+            (diff.path.includes(`.objectsManual.${id}`) ||
               (!diff.path && JSON.stringify(diff.upstream ?? null).includes(`"${id}"`))),
         ),
       upstream: (view, result) =>
@@ -303,7 +394,7 @@ function foreignIntent(targets, { target, room, error }) {
   );
 }
 
-function malformedIntent(target, name) {
+function malformedIntent(target: string, name: string): Divergence {
   return divergence(
     'GP-D2 manual-intent-shape',
     'safety',
@@ -319,7 +410,7 @@ function malformedIntent(target, name) {
   );
 }
 
-function invaderCoordinates() {
+function invaderCoordinates(): Divergence {
   return divergence(
     'GP-D3 invader-coordinates',
     'safety',
@@ -330,20 +421,22 @@ function invaderCoordinates() {
         diff.collection === 'rooms.objects' && (diff.path === '.x' || diff.path === '.y'),
       upstream: (view, result) =>
         result.ok !== undefined &&
-        view.collections['rooms.objects'].some(
+        requiredDocs(view, 'rooms.objects').some(
           (o) => o.userSummoned === EMMA && o.x === '13' && o.y === '10',
         ),
       local: (view, result) =>
         result.ok !== undefined &&
-        view.collections['rooms.objects'].some(
+        requiredDocs(view, 'rooms.objects').some(
           (o) => o.userSummoned === EMMA && o.x === 13 && o.y === 10,
         ),
     },
   );
 }
 
-function fractionalPowerLevel(id) {
-  const creep = (view) => view.collections['users.power_creeps'].find((c) => c._id === id);
+function fractionalPowerLevel(id: string): Divergence {
+  // Power levels are read from normalized raw storage documents.
+  const creep = (view: View): PowerDocument | undefined =>
+    view.collections['users.power_creeps']?.find((c) => c._id === id) as PowerDocument | undefined;
   return divergence(
     'GP-D4 power-level-integer',
     'safety',
@@ -361,55 +454,67 @@ function fractionalPowerLevel(id) {
   );
 }
 
-function experimentationDelete(name) {
-  const exists = (view) =>
-    view.collections['users.power_creeps'].some((c) => c.name === name && c.user === POWER_USER);
+function experimentationDelete(name: string): Divergence {
+  const exists = (view: View): boolean =>
+    requiredDocs(view, 'users.power_creeps').some((c) => c.name === name && c.user === POWER_USER);
   return divergence(
     'GP-D5 power-experimentation-delete',
     'upstream-crash',
     "backend power-creeps.js:80 calls `db['users.power_creeps'].remove`, which the storage client does not provide: deleting during power experimentation fails with a TypeError and keeps the creep. The local game completes the intended immediate deletion.",
     {
       coversResult: true,
-      covers: (diff) => diff.collection === 'users.power_creeps' && diff.upstream?.name === name,
+      covers: (diff) =>
+        diff.collection === 'users.power_creeps' &&
+        typeof diff.upstream === 'object' &&
+        diff.upstream !== null &&
+        'name' in diff.upstream &&
+        diff.upstream.name === name,
       upstream: (view, result) => String(result.error).startsWith('TypeError:') && exists(view),
       local: (view, result) => result.ok === null && !exists(view),
     },
   );
 }
 
-function mapStatRankings(statName) {
-  return divergence(
+function mapStatRankings(statName: string): Divergence {
+  return divergence<ProjectedResult<MapStatsResponse>>(
     'GP-D6 map-stats-rankings',
     'upstream-todo',
     'backend game.js:217-242 parses the requested stat name but never computes it (`statsMax = {}`); the local game ranks the stat per room from its recorded statistics and reports `statsMax[statName]`.',
     {
       coversResult: true,
-      upstream: (view, result) => JSON.stringify(result.ok?.statsMax) === '{}',
+      upstream: (_view, result) => JSON.stringify(result.ok?.statsMax) === '{}',
       // only the ranking may differ: every room entry carries upstream's fields or the stat list
-      local: (view, result) =>
-        Object.keys(result.ok?.statsMax ?? {}).join() === statName &&
-        typeof result.ok.statsMax[statName] === 'number' &&
-        Object.values(result.ok.stats).every((entry) =>
-          Object.keys(entry).every((key) => MAP_STATS_FIELDS.includes(key) || key === statName),
-        ),
+      local: (_view, result) => {
+        const response = result.ok;
+        return (
+          response != null &&
+          Object.keys(response.statsMax).join() === statName &&
+          typeof response.statsMax[statName] === 'number' &&
+          Object.values(response.stats).every((entry) =>
+            Object.keys(entry).every((key) => MAP_STATS_FIELDS.includes(key) || key === statName),
+          )
+        );
+      },
     },
   );
 }
 
-function roomOverviewStats(ownerName) {
-  const owner = (result) => (result.ok?.owner ?? null)?.username ?? null;
-  return divergence(
+function roomOverviewStats(ownerName: string | null): Divergence {
+  const owner = (result: ProjectedResult<OverviewResponse>): string | null =>
+    (result.ok?.owner ?? null)?.username ?? null;
+  return divergence<ProjectedResult<OverviewResponse>>(
     'GP-D7 room-overview-stats',
     'upstream-todo',
     "backend game.js:583-601 is marked `// TODO` and answers `stats: {}, statsMax: {}, totals: {}`; the local game returns the room's recorded stat series and totals (same owner).",
     {
       coversResult: true,
-      upstream: (view, result) =>
+      upstream: (_view, result) =>
         owner(result) === ownerName &&
-        ['stats', 'statsMax', 'totals'].every((key) => JSON.stringify(result.ok[key]) === '{}'),
-      local: (view, result) =>
+        ['stats', 'statsMax', 'totals'].every((key) => JSON.stringify(result.ok?.[key]) === '{}'),
+      local: (_view, result) =>
+        result.ok != null &&
         owner(result) === ownerName &&
-        Object.values(result.ok?.stats ?? {}).length > 0 &&
+        Object.values(result.ok.stats).length > 0 &&
         Object.values(result.ok.stats).every(Array.isArray),
     },
   );
@@ -486,14 +591,14 @@ const MARKET_ORDERS = [
 
 /* ---------------------------------------------------------------- scenarios */
 
-const flagsAt = (count, room) =>
+const flagsAt = (count: number): string =>
   Array.from(
     { length: count },
     (_, i) =>
       `F${String(i)}~1~1~${String(10 + (i % 30))}~${String(10 + (Math.floor(i / 30) % 30))}`,
   ).join('|');
 
-const mapStatsStep = (rooms, statName, userId = EMMA) =>
+const mapStatsStep = (rooms: string[], statName: string, userId = EMMA): Step =>
   game('post', '/map-stats', {
     user: userId,
     body: { rooms, statName },
@@ -506,15 +611,19 @@ const mapStatsStep = (rooms, statName, userId = EMMA) =>
         ),
       };
     },
-    result: apiBody((data) => ({
-      gameTime: data.gameTime,
-      stats: data.stats,
-      statsMax: data.statsMax,
-      users: Object.keys(data.users ?? {}).sort(),
-    })),
+    result: apiBody((raw) => {
+      // Both route implementations return the map statistics body declared below.
+      const data = raw as MapStatsResponse;
+      return {
+        gameTime: data.gameTime,
+        stats: data.stats,
+        statsMax: data.statsMax,
+        users: Object.keys(data.users ?? {}).sort(),
+      };
+    }),
   });
 
-export default [
+const scenarios: Scenario[] = [
   {
     name: 'gameplay.flags.basic',
     covers: ['POST /game/create-flag'],
@@ -522,7 +631,7 @@ export default [
       route('game', 'post', '/create-flag', {
         user: EMMA,
         body: { room: 'W1N1', x: 10, y: 10, name: 'Flag1', color: 1, secondaryColor: 2 },
-        local: (l, game) =>
+        local: (l, game) => {
           game.createFlag(l.context, EMMA, {
             room: 'W1N1',
             x: 10,
@@ -530,7 +639,8 @@ export default [
             name: 'Flag1',
             color: 1,
             secondaryColor: 2,
-          }),
+          });
+        },
       }),
     ],
   },
@@ -597,7 +707,11 @@ export default [
           ],
         }),
         result: apiBody((data) => ({
-          terrain: data.terrain.map((t) => ({ room: t.room, terrain: t.terrain, type: t.type })),
+          terrain: (data.terrain as Document[]).map((t) => ({
+            room: t.room,
+            terrain: t.terrain,
+            type: t.type,
+          })),
         })),
       }),
       game('get', '/room-terrain', {
@@ -723,11 +837,12 @@ export default [
         game('post', '/check-unique-object-name', {
           user: EMMA,
           body: input,
-          local: (l, g) =>
+          local: (l, g) => {
             g.checkUniqueObjectName(l.state.world, EMMA, {
               type: str(input.type),
               name: str(input.name),
-            }),
+            });
+          },
         }),
       ),
     ],
@@ -999,14 +1114,14 @@ export default [
     covers: ['POST /game/create-flag'],
     setup(dump) {
       addDocs(dump, 'rooms.flags', [
-        { _id: 'f00000000000001', user: EMMA, room: 'W1N2', data: flagsAt(5000, 'W1N2') },
+        { _id: 'f00000000000001', user: EMMA, room: 'W1N2', data: flagsAt(5000) },
         {
           _id: 'f00000000000002',
           user: EMMA,
           room: 'W1N3',
-          data: flagsAt(4998, 'W1N3').replace(/F/g, 'G'),
+          data: flagsAt(4998).replace(/F/g, 'G'),
         },
-        { _id: 'f00000000000003', user: MICHAEL, room: 'W9N9', data: flagsAt(10001, 'W9N9') },
+        { _id: 'f00000000000003', user: MICHAEL, room: 'W9N9', data: flagsAt(10001) },
       ]);
     },
     steps: [
@@ -1284,18 +1399,20 @@ export default [
         },
       ]);
     },
-    steps: [
-      [MICHAEL_SPAWN, 'W9N9', 'notifyWhenAttacked', { enabled: true }, 'not owner'],
+    steps: (
       [
-        'c00000000000060',
-        'W9N9',
-        'send',
-        { targetRoomName: 'W1N1', resourceType: 'energy', amount: 500 },
-        'not owner',
-      ],
-      ['c0000000000ffff', 'W1N1', 'notifyWhenAttacked', { enabled: true }, 'invalid object'],
-      [EMMA_SPAWN, 'W9N9', 'notifyWhenAttacked', { enabled: true }, 'invalid object'],
-    ].map(([target, room, name, intent, error], index, all) => ({
+        [MICHAEL_SPAWN, 'W9N9', 'notifyWhenAttacked', { enabled: true }, 'not owner'],
+        [
+          'c00000000000060',
+          'W9N9',
+          'send',
+          { targetRoomName: 'W1N1', resourceType: 'energy', amount: 500 },
+          'not owner',
+        ],
+        ['c0000000000ffff', 'W1N1', 'notifyWhenAttacked', { enabled: true }, 'invalid object'],
+        [EMMA_SPAWN, 'W9N9', 'notifyWhenAttacked', { enabled: true }, 'invalid object'],
+      ] satisfies ForeignIntentCase[]
+    ).map(([target, room, name, intent, error], index, all) => ({
       ...objectIntent(EMMA, { room, _id: target, name, intent }),
       expected: [foreignIntent(all.slice(0, index + 1), { target, room, error })],
     })),
@@ -1303,16 +1420,18 @@ export default [
   {
     name: 'gameplay.intents.malformed',
     covers: ['POST /game/add-object-intent'],
-    steps: [
-      ['room', 'destroyStructure', { roomName: 'W1N1', id: EMMA_SPAWN }],
+    steps: (
       [
-        'room',
-        'createFlag',
-        [{ roomName: 'W2N2', x: 5, y: 5, name: 'Far', color: 1, secondaryColor: 1 }],
-      ],
-      ['room', 'createConstructionSite', [{ x: 5, y: 5, structureType: 'road' }]],
-      [EMMA_SPAWN, 'createCreep', [{ name: 'c1', body: ['move'] }]],
-    ].map(([target, name, intent]) => ({
+        ['room', 'destroyStructure', { roomName: 'W1N1', id: EMMA_SPAWN }],
+        [
+          'room',
+          'createFlag',
+          [{ roomName: 'W2N2', x: 5, y: 5, name: 'Far', color: 1, secondaryColor: 1 }],
+        ],
+        ['room', 'createConstructionSite', [{ x: 5, y: 5, structureType: 'road' }]],
+        [EMMA_SPAWN, 'createCreep', [{ name: 'c1', body: ['move'] }]],
+      ] satisfies MalformedIntentCase[]
+    ).map(([target, name, intent]) => ({
       ...objectIntent(EMMA, { room: 'W1N1', _id: target, name, intent }),
       expected: [malformedIntent(target, name)],
     })),
@@ -1404,19 +1523,23 @@ export default [
         },
       ]);
     },
-    steps: [
-      [EMMA, EMMA_SPAWN, true],
-      [EMMA, EMMA_SPAWN, 0],
-      [EMMA, MICHAEL_SPAWN, true],
-      [EMMA, 'c00000000000030', false],
-      [EMMA, 'c00000000000031', false],
-      [EMMA, EMMA_CONTROLLER, false],
-      [EMMA, '1d190775111f525', false], // a source in W1N1
-    ].map(([userId, id, enabled]) =>
+    steps: (
+      [
+        [EMMA, EMMA_SPAWN, true],
+        [EMMA, EMMA_SPAWN, 0],
+        [EMMA, MICHAEL_SPAWN, true],
+        [EMMA, 'c00000000000030', false],
+        [EMMA, 'c00000000000031', false],
+        [EMMA, EMMA_CONTROLLER, false],
+        [EMMA, '1d190775111f525', false], // a source in W1N1
+      ] satisfies [userId: string, id: string, enabled: unknown][]
+    ).map(([userId, id, enabled]) =>
       game('post', '/set-notify-when-attacked', {
         user: userId,
         body: { _id: id, enabled },
-        local: (l, g) => g.setNotifyWhenAttacked(l.state, userId, { id, enabled: !!enabled }),
+        local: (l, g) => {
+          g.setNotifyWhenAttacked(l.state, userId, { id, enabled: !!enabled });
+        },
       }),
     ),
   },
@@ -1458,19 +1581,22 @@ export default [
         { room: 'W2N1', x: 15, y: 10, size: 'small', type: 'Melee' },
         { room: 'W5N5', x: 15, y: 10, size: 'small', type: 'Melee' },
       ].map(invader),
-      ...[
-        [MICHAEL, 'first'],
-        [EMMA, 'first'],
-        [EMMA, 'first'],
-        [EMMA, EMMA_SPAWN],
-        [EMMA, 'missing'],
-      ].map(([userId, target]) => ({
+      ...(
+        [
+          [MICHAEL, 'first'],
+          [EMMA, 'first'],
+          [EMMA, 'first'],
+          [EMMA, EMMA_SPAWN],
+          [EMMA, 'missing'],
+        ] satisfies [userId: string, target: string][]
+      ).map(([userId, target]): Step => ({
         op: `POST /remove-invader ${target} as ${userId}`,
         upstream: async (o) => {
+          const collection = o.db['rooms.objects'];
           const id =
             target === 'first'
               ? (
-                  await o.db['rooms.objects'].findOne({
+                  await collection.findOne({
                     $and: [{ type: 'creep' }, { userSummoned: EMMA }],
                   })
                 )?._id
@@ -1484,7 +1610,7 @@ export default [
                   (o) => o.type === 'creep' && o.userSummoned === EMMA,
                 )?._id
               : target;
-          return g.removeInvader(l.state, userId, id);
+          g.removeInvader(l.state, userId, id);
         },
         result: apiBody(() => undefined),
       })),
@@ -1497,9 +1623,9 @@ export default [
       {
         ...invader({ room: 'W1N1', x: '13', y: '10', size: 'big', type: 'Ranged' }),
         result: apiBody((data) => {
-          const { x, y, ...rest } = created(data);
-          void x;
-          void y;
+          const { ...rest } = created(data);
+          Reflect.deleteProperty(rest, 'x');
+          Reflect.deleteProperty(rest, 'y');
           return rest;
         }),
         expected: [invaderCoordinates()],
@@ -1699,14 +1825,22 @@ export default [
           user: EMMA,
           query: resourceType === undefined ? {} : { resourceType },
           local: (l, g) => ({ list: g.activeMarketOrders(l.state.world, resourceType) }),
-          result: apiBody((data) => ({ list: data.list.map(doc) })),
+          result: apiBody((raw) => {
+            // Both route implementations return their order documents in `list`.
+            const data = raw as { list: Document[] };
+            return { list: data.list.map(doc) };
+          }),
         }),
       ),
       ...[EMMA, MICHAEL, ALICE].map((userId) =>
         market('get', '/my-orders', {
           user: userId,
           local: (l, g) => ({ list: g.userMarketOrders(l.state.world, userId) }),
-          result: apiBody((data) => ({ list: data.list.map(doc) })),
+          result: apiBody((raw) => {
+            // Both route implementations return their order documents in `list`.
+            const data = raw as { list: Document[] };
+            return { list: data.list.map(doc) };
+          }),
         }),
       ),
       ...['energy', 'H', 'O', undefined].map((resourceType) =>
@@ -1714,7 +1848,11 @@ export default [
           user: EMMA,
           query: resourceType === undefined ? {} : { resourceType },
           local: (l, g) => ({ stats: g.marketHistory(l.state.world, resourceType) }),
-          result: apiBody((data) => ({ stats: data.stats.map(doc) })),
+          result: apiBody((raw) => {
+            // Both route implementations return their history documents in `stats`.
+            const data = raw as { stats: Document[] };
+            return { stats: data.stats.map(doc) };
+          }),
         }),
       ),
     ],
@@ -1827,23 +1965,29 @@ export default [
   },
 ];
 
+export default scenarios;
+
 /* ---------------------------------------------------------------- power creep steps */
 
-function listPowerCreeps(userId) {
+function listPowerCreeps(userId: string): Step {
   return power('get', '/list', {
     user: userId,
     local: (l, g) => ({ list: g.listPowerCreeps(l.state.world, userId) }),
     // LokiJS returns `users.power_creeps` in binary-index order of `user` (unspecified for equal
     // users) and new creeps carry side-specific ids: compare by name, fixture ids verbatim.
-    result: apiBody((data) => ({
-      list: data.list
-        .map((item) => (/^e0{11}\d{3}$/.test(item._id) ? doc(item) : created(item)))
-        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
-    })),
+    result: apiBody((raw) => {
+      // Both route implementations return raw power creep documents in `list`.
+      const data = raw as { list: PowerDocument[] };
+      return {
+        list: data.list
+          .map((item) => (/^e0{11}\d{3}$/.test(item._id) ? doc(item) : created(item)))
+          .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
+      };
+    }),
   });
 }
 
-function createPowerCreep(userId, input) {
+function createPowerCreep(userId: string, input: RawInput): Step {
   return power('post', '/create', {
     user: userId,
     body: input,
@@ -1855,25 +1999,36 @@ function createPowerCreep(userId, input) {
 }
 
 /** A power creep route addressing a creep by name (ids differ between the two sides). */
-function powerById(path, userId, name, input = {}) {
-  const findId = (creeps) => creeps.find((creep) => creep.name === name)?._id ?? name;
+function powerById(path: string, userId: string, name: string, input: PowerInput = {}): Step {
+  const findId = (creeps: readonly { name?: unknown; _id?: string }[]): string =>
+    creeps.find((creep) => creep.name === name)?._id ?? name;
   return {
     op: `POST /power-creeps/${path} ${name} ${JSON.stringify(input)} as ${userId}`,
     upstream: async (o) => {
-      const id = findId(await o.db['users.power_creeps'].find({}));
+      const collection = o.db['users.power_creeps'];
+      // This collection's raw storage documents carry string ids.
+      const id = findId(await collection.find({}));
       return o.api('powerCreeps', 'post', `/${path}`, { userId, body: { id, ...input } });
     },
     local: (l, g) => {
       const id = findId(Object.values(l.state.world.userPowerCreeps));
       switch (path) {
-        case 'upgrade':
-          return g.upgradePowerCreep(l.state, userId, { id, powers: input.powers });
-        case 'rename':
-          return g.renamePowerCreep(l.state, userId, { id, name: input.name });
-        case 'delete':
-          return g.deletePowerCreep(l.context, userId, id);
-        case 'cancel-delete':
-          return g.cancelPowerCreepDelete(l.state, userId, id);
+        case 'upgrade': {
+          g.upgradePowerCreep(l.state, userId, { id, powers: input.powers });
+          return;
+        }
+        case 'rename': {
+          g.renamePowerCreep(l.state, userId, { id, name: input.name });
+          return;
+        }
+        case 'delete': {
+          g.deletePowerCreep(l.context, userId, id);
+          return;
+        }
+        case 'cancel-delete': {
+          g.cancelPowerCreepDelete(l.state, userId, id);
+          return;
+        }
         default:
           throw new Error(path);
       }
@@ -1882,37 +2037,41 @@ function powerById(path, userId, name, input = {}) {
   };
 }
 
-function experimentation(userId) {
+function experimentation(userId: string): Step {
   return power('post', '/experimentation', {
     user: userId,
-    local: (l, g) => g.startPowerExperimentation(l.context, userId),
+    local: (l, g) => {
+      g.startPowerExperimentation(l.context, userId);
+    },
   });
 }
 
 /* ---------------------------------------------------------------- code branch steps */
 
-function branches(userId) {
+function branches(userId: string): Step {
   return userRoute('get', '/branches', {
     user: userId,
     local: (l, g) => ({ list: structuredClone(g.listBranches(l.context, userId)) }),
     // LokiJS returns `users.code` in binary-index order of `user`, which is unspecified for equal
     // users; compare the list by branch name. Stored `new Date()` timestamps arrive as ISO strings.
-    result: apiBody((data) =>
-      data.list
+    result: apiBody((raw) => {
+      // Both route implementations return raw branch documents in `list`.
+      const data = raw as { list: BranchDocument[] };
+      return data.list
         .map((item) => {
-          const { _id, timestamp, ...rest } = doc(item);
-          void _id;
+          const { timestamp, ...rest } = doc(item);
+          Reflect.deleteProperty(rest, '_id');
           return {
             ...rest,
             timestamp: typeof timestamp === 'string' ? Date.parse(timestamp) : (timestamp ?? null),
           };
         })
-        .sort((a, b) => (a.branch < b.branch ? -1 : a.branch > b.branch ? 1 : 0)),
-    ),
+        .sort((a, b) => (a.branch < b.branch ? -1 : a.branch > b.branch ? 1 : 0));
+    }),
   });
 }
 
-function getCode(userId, branch) {
+function getCode(userId: string, branch: string | undefined): Step {
   return userRoute('get', '/code', {
     user: userId,
     query: branch === undefined ? {} : { branch },
@@ -1925,7 +2084,7 @@ function getCode(userId, branch) {
   });
 }
 
-function saveCode(userId, input) {
+function saveCode(userId: string, input: RawInput): Step {
   return userRoute('post', '/code', {
     user: userId,
     body: input,
@@ -1940,7 +2099,7 @@ function saveCode(userId, input) {
   });
 }
 
-function setActive(userId, activeName, branch) {
+function setActive(userId: string, activeName: string, branch: string): Step {
   return userRoute('post', '/set-active-branch', {
     user: userId,
     body: { activeName, branch },
@@ -1952,7 +2111,7 @@ function setActive(userId, activeName, branch) {
   });
 }
 
-function clone(userId, input) {
+function clone(userId: string, input: RawInput & { newName: string }): Step {
   return userRoute('post', '/clone-branch', {
     user: userId,
     body: input,
@@ -1966,7 +2125,7 @@ function clone(userId, input) {
       ) {
         throw new g.GameError('invalid branch name');
       }
-      const options = { newName, defaultModules };
+      const options: CloneBranchOptions = { newName, defaultModules };
       if (typeof source === 'string') options.source = source;
       g.cloneBranch(l.context, userId, options);
       return { timestamp: l.context.now() };
@@ -1975,7 +2134,7 @@ function clone(userId, input) {
   });
 }
 
-function deleteBranch(userId, branch) {
+function deleteBranch(userId: string, branch: string): Step {
   return userRoute('post', '/delete-branch', {
     user: userId,
     body: { branch },

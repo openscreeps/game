@@ -21,6 +21,18 @@
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { isRecord } from '../../src/guards.ts';
+import type { CodeBranch, GameState, NotificationRecipient, WorldState } from '../../src/index.ts';
+import type * as GameExports from '../../src/index.ts';
+import type { WorldRandom } from '../../src/world/random.ts';
+import type { Document, Dump, Game, Local, TranslateModules, View } from './types.ts';
+
+interface StoredDocument extends Document {
+  _id: string;
+}
+interface StoredBranch extends Omit<CodeBranch, 'timestamp'> {
+  timestamp?: number | string;
+}
 export const HOST_USER_FIELDS = [
   'email',
   'emailDirty',
@@ -38,9 +50,9 @@ const JOB_FIELDS = [
   ['rooms', 'nextForceUpdateTime', 'forceUpdate:'],
   ['rooms', 'nextNpcMarketOrder', 'npcOrders:'],
   ['users', 'lastNotifyDate', 'notify:'],
-];
+] as const;
 
-const DATE_FIELDS = { 'users.money': 'date', 'users.resources': 'date' };
+const DATE_FIELDS: Record<string, string> = { 'users.money': 'date', 'users.resources': 'date' };
 
 const WORLD_COLLECTIONS = {
   rooms: 'rooms',
@@ -54,87 +66,108 @@ const WORLD_COLLECTIONS = {
   'users.resources': 'usersResources',
   'users.notifications': 'notifications',
   'market.stats': 'marketStats',
-};
+} as const;
 
-export async function loadLocal(gameRoot) {
-  const url = (path) => pathToFileURL(join(gameRoot, path)).href;
-  const game = await import(url('src/index.ts'));
-  const { WorldRandom } = await import(url('src/world/random.ts'));
-  return { game, WorldRandom };
+export async function loadLocal(gameRoot: string) {
+  // --local-root selects current or extracted historical source at runtime.
+  const url = (path: string) => pathToFileURL(join(gameRoot, path)).href;
+  const game = (await import(url('src/index.ts'))) as typeof GameExports;
+  const random = (await import(url('src/world/random.ts'))) as { WorldRandom: typeof WorldRandom };
+  return { game, WorldRandom: random.WorldRandom };
 }
 
-function clone(value) {
-  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+function clone<T>(value: T): T {
+  return value === undefined ? value : (JSON.parse(JSON.stringify(value)) as T);
 }
 
 /** Build a local game (state + live runtime + host profiles) from a storage dump. */
-export function toLocal(game, dump, now, translateModules = (modules) => modules) {
+export function toLocal(
+  game: Game,
+  dump: Dump,
+  now: () => number,
+  translateModules: TranslateModules = (modules) => modules,
+): Local {
   const envData = dump.env[0]?.data ?? {};
-  const jobs = {};
-  const profiles = {};
+  const jobs: GameState['jobs'] = {};
+  const profiles: Local['profiles'] = {};
   const world = game.createWorldState({
-    gameTime: Number.parseInt(envData.gameTime, 10),
+    gameTime: Number.parseInt(String(envData.gameTime), 10),
     activeRooms: clone(envData.activeRooms ?? []),
   });
   for (const [collection, field] of Object.entries(WORLD_COLLECTIONS)) {
     for (const source of dump.collections[collection] ?? []) {
-      const doc = clone(source);
+      // The pinned storage schema provides ids and collection-specific document fields.
+      const doc = clone(source) as StoredDocument;
       for (const [owner, name, prefix] of JOB_FIELDS) {
         if (owner === collection && doc[name] !== undefined) {
-          jobs[prefix + doc._id] = doc[name];
-          delete doc[name];
+          jobs[prefix + doc._id] = doc[name] as number;
+          Reflect.deleteProperty(doc, name);
         }
       }
       if (collection === 'users') {
-        const profile = {};
+        const profile: Document = {};
         for (const name of HOST_USER_FIELDS) {
           if (doc[name] !== undefined) profile[name] = doc[name];
-          delete doc[name];
+          Reflect.deleteProperty(doc, name);
         }
         profiles[doc._id] = profile;
       }
       const dateField = DATE_FIELDS[collection];
-      if (dateField && typeof doc[dateField] === 'string')
-        doc[dateField] = Date.parse(doc[dateField]);
-      world[field][doc._id] = doc;
+      const date = dateField === undefined ? undefined : doc[dateField];
+      if (dateField && typeof date === 'string') doc[dateField] = Date.parse(date);
+      const records: Record<string, object> = world[field];
+      records[doc._id] = doc;
     }
   }
-  for (const doc of dump.collections['rooms.terrain'] ?? []) world.terrain[doc.room] = doc.terrain;
+  for (const doc of dump.collections['rooms.terrain'] ?? []) {
+    world.terrain[doc.room as string] = doc.terrain as string;
+  }
 
   const runtime = new game.BotRuntime({ now: () => now() });
-  const branches = {};
+  const branches: GameState['branches'] = {};
   for (const doc of dump.collections['users.code'] ?? []) {
-    const branch = clone(doc);
+    const branch = clone(doc) as unknown as StoredBranch;
     branch.modules = translateModules(branch.modules);
     // `new Date()` timestamps reach the storage as ISO strings through the RPC
     if (typeof branch.timestamp === 'string') branch.timestamp = Date.parse(branch.timestamp);
-    branches[doc._id] = branch;
-    if (doc.activeWorld) runtime.setCode(doc.user, clone(branch.modules), doc.branch);
+    branches[branch._id] = branch as CodeBranch;
+    if (branch.activeWorld) runtime.setCode(branch.user, clone(branch.modules), branch.branch);
   }
   for (const [key, value] of Object.entries(envData)) {
     if (key.startsWith('memory:') && typeof value === 'string') {
       runtime.setMemory(key.slice('memory:'.length), value);
     }
     if (key.startsWith('mapView:') && typeof value === 'string') {
-      world.mapViews[key.slice('mapView:'.length)] = JSON.parse(value);
+      world.mapViews[key.slice('mapView:'.length)] = JSON.parse(
+        value,
+      ) as WorldState['mapViews'][string];
     }
   }
-  const pendingIntents = {};
+  const pendingIntents: Record<
+    string,
+    Record<string, GameState['pendingIntents'][string][string]>
+  > = {};
   for (const doc of dump.collections['rooms.intents'] ?? []) {
-    for (const [user, intents] of Object.entries(doc.users ?? {})) {
+    const users = (doc.users ?? {}) as Record<
+      string,
+      { objectsManual?: GameState['pendingIntents'][string][string] }
+    >;
+    for (const [user, intents] of Object.entries(users)) {
       if (intents.objectsManual) {
-        (pendingIntents[doc.room] ??= {})[user] = clone(intents.objectsManual);
+        (pendingIntents[doc.room as string] ??= {})[user] = clone(intents.objectsManual);
       }
     }
   }
-  const pendingGlobalIntents = {};
+  const pendingGlobalIntents: GameState['pendingGlobalIntents'] = {};
   for (const doc of dump.collections['users.intents'] ?? []) {
-    const target = (pendingGlobalIntents[doc.user] ??= {});
-    for (const [name, list] of Object.entries(doc.intents ?? {})) {
-      (target[name] ??= []).push(...clone(list));
+    const target = (pendingGlobalIntents[doc.user as string] ??= {});
+    for (const [name, list] of Object.entries((doc.intents ?? {}) as Record<string, unknown[]>)) {
+      // Global intent names and payloads are the upstream sanitizer's storage output.
+      const lists = target as Record<string, unknown[]>;
+      (lists[name] ??= []).push(...clone(list));
     }
   }
-  const state = {
+  const state: GameState = {
     version: 1,
     world,
     runtime: runtime.snapshot(),
@@ -157,12 +190,12 @@ export function toLocal(game, dump, now, translateModules = (modules) => modules
       terrainChanged() {},
     },
     hooks: {
-      notificationRecipient(userId) {
+      notificationRecipient(userId: string) {
         const profile = profiles[userId];
         if (!profile) return undefined;
-        const recipient = {};
-        if (profile.email !== undefined) recipient.email = profile.email;
-        if (profile.notifyPrefs !== undefined) recipient.preferences = profile.notifyPrefs;
+        const recipient: NotificationRecipient = {};
+        if (typeof profile.email === 'string') recipient.email = profile.email;
+        if (isRecord(profile.notifyPrefs)) recipient.preferences = profile.notifyPrefs;
         return recipient;
       },
     },
@@ -170,13 +203,14 @@ export function toLocal(game, dump, now, translateModules = (modules) => modules
 }
 
 /** Project a local game back into the storage layout for comparison. */
-export function fromLocal(local) {
+export function fromLocal(local: Local): View {
   const { state, runtime, profiles } = local;
   const { world } = state;
-  const collections = {};
+  const collections: Record<string, Document[]> = {};
   for (const [collection, field] of Object.entries(WORLD_COLLECTIONS)) {
-    collections[collection] = Object.values(world[field]).map((source) => {
-      const doc = clone(source);
+    const records: Record<string, object> = world[field];
+    collections[collection] = Object.values(records).map((source) => {
+      const doc = clone(source) as StoredDocument;
       for (const [owner, name, prefix] of JOB_FIELDS) {
         if (owner === collection && state.jobs[prefix + doc._id] !== undefined) {
           doc[name] = state.jobs[prefix + doc._id];
@@ -184,8 +218,9 @@ export function fromLocal(local) {
       }
       if (collection === 'users') Object.assign(doc, clone(profiles[doc._id] ?? {}));
       const dateField = DATE_FIELDS[collection];
-      if (dateField && typeof doc[dateField] === 'number') {
-        doc[dateField] = new Date(doc[dateField]).toISOString();
+      const date = dateField === undefined ? undefined : doc[dateField];
+      if (dateField && typeof date === 'number') {
+        doc[dateField] = new Date(date).toISOString();
       }
       return doc;
     });
@@ -194,7 +229,9 @@ export function fromLocal(local) {
     room,
     terrain,
   }));
-  collections['users.code'] = Object.values(state.branches).map(clone);
+  collections['users.code'] = Object.values(state.branches).map(
+    (branch) => clone(branch) as unknown as Document,
+  );
   collections['rooms.intents'] = Object.entries(state.pendingIntents).map(([room, users]) => ({
     room,
     users: Object.fromEntries(
@@ -210,10 +247,10 @@ export function fromLocal(local) {
       intents: clone(intents),
     }),
   );
-  const memory = {};
+  const memory: Record<string, unknown> = {};
   for (const [user, snapshot] of Object.entries(runtime.snapshot().users)) {
     // the runtime keeps '' for "no Memory stored"; upstream simply has no `memory:<user>` key
-    if (snapshot.memory !== undefined && snapshot.memory !== '') memory[user] = snapshot.memory;
+    if (snapshot.memory !== '') memory[user] = snapshot.memory;
   }
   return {
     collections,

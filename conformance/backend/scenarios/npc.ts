@@ -4,18 +4,32 @@
  * `game/src/world/strongholds.ts` and `game/src/players.ts`.
  */
 
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import type { SpawnBotOptions, SpawnStrongholdOptions } from '../../../src/index.ts';
+import type { Difference, Divergence, Scenario, ScenarioContext, Step } from '../types.ts';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { docs, driverAccessibleRooms, find, setGameTime, USERS } from './support.mjs';
+import {
+  docs,
+  driverAccessibleRooms,
+  requiredDoc,
+  requiredDocs,
+  isDocument,
+  isStringList,
+  setGameTime,
+  USERS,
+} from './support.ts';
 
 const BOT = 'conformanceBot';
-let botDirectory;
+let botDirectory: string | undefined;
 
 /** Bot AI directory shared by both sides (upstream reads it through `config.common.bots`). */
-function botDir() {
+function botDir(): string {
   if (!botDirectory) {
     botDirectory = mkdtempSync(join(tmpdir(), 'screeps-conformance-bot-'));
+    process.once('exit', () => {
+      if (botDirectory) rmSync(botDirectory, { recursive: true, force: true });
+    });
     writeFileSync(
       join(botDirectory, 'main.js'),
       "const role = require('role.harvester');\nmodule.exports.loop = () => role.run();\n",
@@ -26,11 +40,11 @@ function botDir() {
   return botDirectory;
 }
 
-const registerBot = ({ oracle }) => {
+const registerBot = ({ oracle }: ScenarioContext): void => {
   oracle.config.common.bots[BOT] = botDir();
 };
 
-function spawnBot(room, options) {
+function spawnBot(room: string, options?: SpawnBotOptions): Step {
   return {
     op: `bots.spawn(${JSON.stringify(BOT)}, ${JSON.stringify(room)}${options ? `, ${JSON.stringify(options)}` : ''})`,
     before: registerBot,
@@ -46,7 +60,7 @@ function spawnBot(room, options) {
   };
 }
 
-function reloadBot() {
+function reloadBot(): Step {
   return {
     op: `bots.reload(${JSON.stringify(BOT)})`,
     before: registerBot,
@@ -55,7 +69,7 @@ function reloadBot() {
   };
 }
 
-function removeBot(username) {
+function removeBot(username: string): Step {
   return {
     op: `bots.removeUser(${JSON.stringify(username)})`,
     upstream: (o) => o.modules.bots.removeUser(username),
@@ -63,26 +77,29 @@ function removeBot(username) {
   };
 }
 
-function spawnStronghold(room, options) {
+function spawnStronghold(room: string, options?: SpawnStrongholdOptions): Step {
   return {
     op: `strongholds.spawn(${JSON.stringify(room)}${options ? `, ${JSON.stringify(options)}` : ''})`,
     upstream: (o) => o.modules.strongholdsCli.spawn(room, options && structuredClone(options)),
-    local: (l, game) =>
-      game.spawnStronghold(l.state.world, room, options && structuredClone(options)),
+    local: (l, game) => {
+      game.spawnStronghold(l.state.world, room, options && structuredClone(options));
+    },
   };
 }
 
-function expandStronghold(room) {
+function expandStronghold(room: string): Step {
   return {
     op: `strongholds.expand(${JSON.stringify(room)})`,
     before: driverAccessibleRooms,
     upstream: (o) => o.modules.strongholdsCli.expand(room),
-    local: (l, game) => game.expandStrongholdInRoom(l.state.world, room, l.context.now()),
+    local: (l, game) => {
+      game.expandStrongholdInRoom(l.state.world, room, l.context.now());
+    },
   };
 }
 
 /** Rooms whose status upstream `respawnUser` rewrites although the player never owned them. */
-function unrelatedRoomStatus(owned) {
+function unrelatedRoomStatus(owned: readonly string[]): Divergence {
   return {
     id: 'respawn-unrelated-room-status',
     kind: 'safety',
@@ -94,24 +111,27 @@ function unrelatedRoomStatus(owned) {
       !owned.includes(diff.key) &&
       diff.upstream === 'normal',
     assertUpstream: (view) =>
-      view.collections.rooms.find((r) => r._id === 'W3N3')?.status === 'normal',
+      requiredDocs(view, 'rooms').find((r) => r._id === 'W3N3')?.status === 'normal',
     assertLocal: (view) =>
-      view.collections.rooms.find((r) => r._id === 'W3N3')?.status === 'out of borders',
+      requiredDocs(view, 'rooms').find((r) => r._id === 'W3N3')?.status === 'out of borders',
   };
 }
 
-function respawn(userId, owned) {
+function respawn(userId: string, owned: readonly string[]): Step {
   return {
     op: `utils.respawnUser(${JSON.stringify(userId)})`,
     upstream: (o) => o.modules.utils.respawnUser(userId),
-    local: (l, game) => game.respawnUser(l.state, userId),
+    local: (l, game) => {
+      game.respawnUser(l.state, userId);
+    },
     expected: [unrelatedRoomStatus(owned)],
   };
 }
 
 /** Diff of `env.activeRooms` (sorted sets) where local schedules exactly the extra `rooms`. */
-function onlyLocalActiveRooms(diff, rooms) {
+function onlyLocalActiveRooms(diff: Difference, rooms: readonly string[]): boolean {
   if (diff.collection !== 'env' || diff.path !== 'env.activeRooms') return false;
+  if (!isStringList(diff.upstream) || !isStringList(diff.local)) return false;
   const up = new Set(diff.upstream);
   const extra = diff.local.filter((room) => !up.has(room));
   return (
@@ -119,7 +139,7 @@ function onlyLocalActiveRooms(diff, rooms) {
   );
 }
 
-const explicitStronghold = {
+const explicitStronghold: Divergence = {
   id: 'stronghold-explicit-position',
   kind: 'upstream-noop',
   reason:
@@ -128,12 +148,13 @@ const explicitStronghold = {
   covers: (diff) =>
     (diff.collection === 'rooms.objects' &&
       diff.upstream === '<absent>' &&
-      diff.local?.room === 'W6N6') ||
+      isDocument(diff.local) &&
+      diff.local.room === 'W6N6') ||
     onlyLocalActiveRooms(diff, ['W6N6']),
   assertUpstream: (view) =>
-    !view.collections['rooms.objects'].some((o) => o.room === 'W6N6' && o.strongholdId),
+    !requiredDocs(view, 'rooms.objects').some((o) => o.room === 'W6N6' && o.strongholdId),
   assertLocal: (view) =>
-    view.collections['rooms.objects'].some(
+    requiredDocs(view, 'rooms.objects').some(
       (o) =>
         o.room === 'W6N6' &&
         o.type === 'invaderCore' &&
@@ -143,8 +164,8 @@ const explicitStronghold = {
     ),
 };
 
-let w3n3Controller;
-const caseInsensitiveBotName = {
+let w3n3Controller: unknown;
+const caseInsensitiveBotName: Divergence = {
   id: 'bot-username-case-insensitive',
   kind: 'safety',
   reason:
@@ -153,11 +174,13 @@ const caseInsensitiveBotName = {
   covers: (diff) =>
     (diff.collection === 'users' &&
       diff.local === '<absent>' &&
-      diff.upstream?.usernameLower === 'testbot') ||
+      isDocument(diff.upstream) &&
+      diff.upstream.usernameLower === 'testbot') ||
     (diff.collection === 'users.code' && diff.local === '<absent>') ||
     (diff.collection === 'rooms.objects' &&
       diff.local === '<absent>' &&
-      diff.upstream?.room === 'W3N3') ||
+      isDocument(diff.upstream) &&
+      diff.upstream.room === 'W3N3') ||
     (diff.collection === 'rooms.objects' && diff.key === w3n3Controller) ||
     (diff.collection === 'rooms' && diff.key === 'W3N3' && diff.path === '.invaderGoal') ||
     (diff.collection === 'env' &&
@@ -165,14 +188,17 @@ const caseInsensitiveBotName = {
       diff.local === '<absent>') ||
     onlyLocalActiveRooms({ ...diff, upstream: diff.local, local: diff.upstream }, ['W3N3']),
   assertUpstream: (view, result) =>
+    isDocument(result) &&
     result.ok === true &&
-    view.collections.users.filter((u) => u.usernameLower === 'testbot').length === 2,
+    requiredDocs(view, 'users').filter((u) => u.usernameLower === 'testbot').length === 2,
   assertLocal: (view, result) =>
+    isDocument(result) &&
     result.error === 'User with the name "testbot" already exists' &&
-    view.collections.users.filter((u) => u.usernameLower === 'testbot').length === 1,
+    requiredDocs(view, 'users').filter((u) => u.usernameLower === 'testbot').length === 1,
 };
 
-export default [
+// Required matches and projected collections are checked against the real storage fixture.
+const scenarios: Scenario[] = [
   {
     name: 'npc.bots.lifecycle',
     covers: [
@@ -230,7 +256,7 @@ export default [
     name: 'npc.respawn',
     covers: ['utils.respawnUser'],
     setup(dump) {
-      find(dump, 'rooms', (r) => r._id === 'W3N3')[0].status = 'out of borders';
+      requiredDoc(dump, 'rooms', (r) => r._id === 'W3N3').status = 'out of borders';
       const objects = docs(dump, 'rooms.objects');
       objects.push({
         _id: 'emmacreep',
@@ -319,7 +345,7 @@ export default [
         spawnCooldownTime: 0,
         powers: {},
       });
-      docs(dump, 'users').find((u) => u._id === USERS.emma).rooms = ['W1N1'];
+      requiredDoc(dump, 'users', (u) => u._id === USERS.emma).rooms = ['W1N1'];
     },
     steps: [respawn(USERS.emma, ['W1N1']), respawn(USERS.emma, ['W1N1'])],
   },
@@ -362,11 +388,11 @@ export default [
     name: 'npc.bots.username-case',
     covers: ['bots.spawn'],
     setup(dump) {
-      w3n3Controller = find(
+      w3n3Controller = requiredDoc(
         dump,
         'rooms.objects',
         (o) => o.room === 'W3N3' && o.type === 'controller',
-      )[0]._id;
+      )._id;
     },
     steps: [
       spawnBot('W2N2', { username: 'TestBot' }),
@@ -374,3 +400,5 @@ export default [
     ],
   },
 ];
+
+export default scenarios;

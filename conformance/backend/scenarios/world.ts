@@ -3,33 +3,42 @@
  * closeRoom/removeRoom against `game/src/world/generate.ts`.
  */
 
+import type { GenerateRoomOptions } from '../../../src/index.ts';
+import type { Scenario, Step } from '../types.ts';
+
 const FUTURE = Date.UTC(2026, 6, 1);
 
-function generate(roomName, options = {}) {
+function generate(roomName: string, options: GenerateRoomOptions = {}): Step {
   return {
     op: `map.generateRoom(${JSON.stringify(roomName)}, ${JSON.stringify(options)})`,
     upstream: (o) => o.modules.map.generateRoom(roomName, structuredClone(options)),
-    local: (l, game) => game.generateRoom(l.state.world, roomName, structuredClone(options)),
+    local: (l, game) => {
+      game.generateRoom(l.state.world, roomName, structuredClone(options));
+    },
   };
 }
 
-function open(roomName, timestamp) {
+function open(roomName: string, timestamp?: number): Step {
   return {
     op: `map.openRoom(${JSON.stringify(roomName)}${timestamp ? `, ${String(timestamp)}` : ''})`,
     upstream: (o) => o.modules.map.openRoom(roomName, timestamp),
-    local: (l, game) => game.openRoom(l.state.world, roomName, timestamp),
+    local: (l, game) => {
+      game.openRoom(l.state.world, roomName, timestamp);
+    },
   };
 }
 
-function close(roomName) {
+function close(roomName: string): Step {
   return {
     op: `map.closeRoom(${JSON.stringify(roomName)})`,
     upstream: (o) => o.modules.map.closeRoom(roomName),
-    local: (l, game) => game.closeRoom(l.state.world, roomName),
+    local: (l, game) => {
+      game.closeRoom(l.state.world, roomName);
+    },
   };
 }
 
-function remove(roomName, { withAssets = false } = {}) {
+function remove(roomName: string, { withAssets = false }: { withAssets?: boolean } = {}): Step {
   return {
     op: `map.removeRoom(${JSON.stringify(roomName)})`,
     // a real server ships the map image of every existing room; removeRoom unlinks it
@@ -37,11 +46,13 @@ function remove(roomName, { withAssets = false } = {}) {
       ? ({ oracle }) => oracle.modules.map.updateRoomImageAssets(roomName)
       : undefined,
     upstream: (o) => o.modules.map.removeRoom(roomName),
-    local: (l, game) => game.removeRoom(l.state, roomName),
+    local: (l, game) => {
+      game.removeRoom(l.state, roomName);
+    },
   };
 }
 
-const lifecycle = (roomName) => [
+const lifecycle = (roomName: string): Step[] => [
   generate(roomName),
   open(roomName, FUTURE),
   close(roomName),
@@ -51,7 +62,7 @@ const lifecycle = (roomName) => [
 
 const ADJACENT = ['W11N3', 'W11N7', 'W4N11', 'W8N11', 'E0N4', 'W3S0', 'W11N10', 'E0N0'];
 
-export default [
+const scenarios: Scenario[] = [
   ...ADJACENT.map((roomName) => ({
     name: `world.generate.adjacent.${roomName}`,
     covers: ['map.generateRoom', 'map.openRoom', 'map.closeRoom', 'map.removeRoom'],
@@ -137,3 +148,5 @@ export default [
     ],
   },
 ];
+
+export default scenarios;

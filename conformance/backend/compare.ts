@@ -13,36 +13,57 @@
  * representation for, is reported.
  */
 
-import { HOST_USER_FIELDS } from './local.mjs';
+import { HOST_USER_FIELDS } from './local.ts';
+import { isRecord } from '../../src/guards.ts';
+import type { CodeModules } from '../../src/index.ts';
+import type { Document, Dump, Difference, Side, TranslateModules, View } from './types.ts';
+import { isDeepStrictEqual } from 'node:util';
+
+export interface Labeler {
+  relabel(up: View, lo: View): { up: View; lo: View; ambiguous: string[] };
+}
+interface ValueDifference {
+  path: string;
+  upstream: unknown;
+  local: unknown;
+}
+interface KeyEntry {
+  id: string;
+  key: string;
+}
 
 // host terrain cache (map.updateTerrainData) and the driver-written accessible rooms list
 const HOST_ENV_KEYS = new Set(['terrainData', 'accessibleRooms']);
 const RUNTIME_ENV_PREFIX = 'memory:';
 const MAP_VIEW_PREFIX = 'mapView:';
 
-export function canonical(value) {
-  if (Array.isArray(value)) return value.map(canonical);
-  if (value && typeof value === 'object') {
-    const result = {};
+export function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return (value as unknown[]).map(canonical);
+  if (isRecord(value)) {
+    const result: Document = {};
     for (const key of Object.keys(value).sort()) result[key] = canonical(value[key]);
     return result;
   }
   return value;
 }
 
-const json = (value) => JSON.stringify(canonical(value));
+const json = (value: unknown) => JSON.stringify(canonical(value));
 
 /**
  * Upstream storage dump -> comparison layout (same shape as `fromLocal`). `translateModules` is the
  * original `utils.translateModulesFromDb` (stored module names escape `.`, `/` and `\`).
  */
-export function fromUpstream(dump, initial, translateModules = (modules) => modules) {
-  const collections = {};
+export function fromUpstream(
+  dump: Dump,
+  initial: Dump,
+  translateModules: TranslateModules = (modules) => modules,
+): View {
+  const collections: Record<string, Document[]> = {};
   for (const [name, docs] of Object.entries(dump.collections)) {
     collections[name] = docs.map((doc) => structuredClone(doc));
   }
   for (const doc of collections['users.code'] ?? []) {
-    if (doc.modules) doc.modules = translateModules(doc.modules);
+    if (doc.modules) doc.modules = translateModules(doc.modules as CodeModules);
     // upstream stores `new Date()` (ISO string after the RPC) or `getTime()` depending on the route
     if (typeof doc.timestamp === 'string') doc.timestamp = Date.parse(doc.timestamp);
   }
@@ -50,17 +71,20 @@ export function fromUpstream(dump, initial, translateModules = (modules) => modu
     room,
     terrain,
   }));
-  const intents = new Map();
+  const intents = new Map<unknown, { room: unknown; users: Document }>();
   for (const doc of collections['rooms.intents'] ?? []) {
     const merged = intents.get(doc.room) ?? { room: doc.room, users: {} };
     Object.assign(merged.users, doc.users ?? {});
     intents.set(doc.room, merged);
   }
   collections['rooms.intents'] = [...intents.values()];
-  const globals = new Map();
+  const globals = new Map<unknown, { user: unknown; intents: Record<string, unknown[]> }>();
   for (const doc of collections['users.intents'] ?? []) {
-    const merged = globals.get(doc.user) ?? { user: doc.user, intents: {} };
-    for (const [name, list] of Object.entries(doc.intents ?? {})) {
+    const merged: { user: unknown; intents: Record<string, unknown[]> } = globals.get(doc.user) ?? {
+      user: doc.user,
+      intents: {},
+    };
+    for (const [name, list] of Object.entries((doc.intents ?? {}) as Record<string, unknown[]>)) {
       (merged.intents[name] ??= []).push(...list);
     }
     globals.set(doc.user, merged);
@@ -69,9 +93,9 @@ export function fromUpstream(dump, initial, translateModules = (modules) => modu
 
   const envData = dump.env[0]?.data ?? {};
   const initialEnv = initial.env[0]?.data ?? {};
-  const memory = {};
-  const mapViews = {};
-  const unmappedEnv = {};
+  const memory: Record<string, unknown> = {};
+  const mapViews: Record<string, unknown> = {};
+  const unmappedEnv: Record<string, unknown> = {};
   for (const key of new Set([...Object.keys(envData), ...Object.keys(initialEnv)])) {
     if (key.startsWith(RUNTIME_ENV_PREFIX)) {
       // an empty memory string and an absent key both mean "no Memory stored"
@@ -82,7 +106,7 @@ export function fromUpstream(dump, initial, translateModules = (modules) => modu
       if (envData[key] !== undefined) {
         const value = envData[key];
         mapViews[key.slice(MAP_VIEW_PREFIX.length)] =
-          typeof value === 'string' ? JSON.parse(value) : value;
+          typeof value === 'string' ? (JSON.parse(value) as unknown) : value;
       }
     } else if (!['gameTime', 'activeRooms'].includes(key) && !HOST_ENV_KEYS.has(key)) {
       if (json(envData[key]) !== json(initialEnv[key])) unmappedEnv[key] = envData[key] ?? null;
@@ -91,7 +115,7 @@ export function fromUpstream(dump, initial, translateModules = (modules) => modu
   return {
     collections,
     env: {
-      gameTime: Number.parseInt(envData.gameTime, 10),
+      gameTime: Number.parseInt(String(envData.gameTime), 10),
       activeRooms: [...(envData.activeRooms ?? [])],
       memory,
       mapViews,
@@ -100,26 +124,26 @@ export function fromUpstream(dump, initial, translateModules = (modules) => modu
   };
 }
 
-const KEY_FIELD = {
+const KEY_FIELD: Record<string, string> = {
   'rooms.terrain': 'room',
   'rooms.intents': 'room',
   'users.intents': 'user',
 };
 const NO_ID = new Set(['rooms', 'rooms.terrain', 'rooms.intents', 'users.intents']);
 
-export function knownIds(dump) {
-  const ids = new Set();
+export function knownIds(dump: Dump) {
+  const ids = new Set<string>();
   for (const docs of Object.values(dump.collections)) {
     for (const doc of docs) if (typeof doc._id === 'string') ids.add(doc._id);
   }
   return ids;
 }
 
-function replaceIds(value, labels) {
+function replaceIds(value: unknown, labels: Map<string, string>): unknown {
   if (typeof value === 'string') return labels.get(value) ?? value;
-  if (Array.isArray(value)) return value.map((item) => replaceIds(item, labels));
-  if (value && typeof value === 'object') {
-    const result = {};
+  if (Array.isArray(value)) return (value as unknown[]).map((item) => replaceIds(item, labels));
+  if (isRecord(value)) {
+    const result: Document = {};
     for (const [key, item] of Object.entries(value))
       result[labels.get(key) ?? key] = replaceIds(item, labels);
     return result;
@@ -127,7 +151,7 @@ function replaceIds(value, labels) {
   return value;
 }
 
-const byKey = (a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+const byKey = (a: KeyEntry, b: KeyEntry) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
 
 /**
  * Labels for ids created during one scenario, kept for the whole scenario so references to
@@ -135,13 +159,13 @@ const byKey = (a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
  * across sides first by identical content (other new ids masked or already labeled), then in
  * canonical content order; each pair shares one label.
  */
-export function createLabeler(known) {
-  const labels = { upstream: new Map(), local: new Map() };
-  const counters = new Map();
-  const ambiguous = [];
+export function createLabeler(known: Set<string>): Labeler {
+  const labels = { upstream: new Map<string, string>(), local: new Map<string, string>() };
+  const counters = new Map<string, number>();
+  const ambiguous: string[] = [];
 
-  function fresh(view, side) {
-    const result = new Map();
+  function fresh(view: View, side: Side) {
+    const result = new Map<string, string>();
     for (const [name, docs] of Object.entries(view.collections)) {
       if (NO_ID.has(name)) continue;
       for (const doc of docs) {
@@ -153,18 +177,21 @@ export function createLabeler(known) {
     return result;
   }
 
-  function assign(upView, loView) {
+  function assign(upView: View, loView: View) {
     const pending = { upstream: fresh(upView, 'upstream'), local: fresh(loView, 'local') };
-    const masks = {};
-    for (const side of ['upstream', 'local']) {
+    const masks = {} as Record<Side, Map<string, string>>;
+    for (const side of ['upstream', 'local'] as const) {
       masks[side] = new Map([
         ...labels[side],
-        ...[...pending[side].keys()].map((id) => [id, '#new']),
+        ...[...pending[side].keys()].map((id): [string, string] => [id, '#new']),
       ]);
     }
-    const entries = (view, side, name) =>
+    const entries = (view: View, side: Side, name: string): KeyEntry[] =>
       (view.collections[name] ?? [])
-        .filter((doc) => pending[side].has(doc._id))
+        .filter(
+          (doc): doc is Document & { _id: string } =>
+            typeof doc._id === 'string' && pending[side].has(doc._id),
+        )
         .map((doc) => ({
           id: doc._id,
           key: json(replaceIds({ ...doc, _id: undefined }, masks[side])),
@@ -178,44 +205,47 @@ export function createLabeler(known) {
         return `<new ${name} #${String(n)}>`;
       };
       let up = entries(upView, 'upstream', name);
-      let lo = entries(loView, 'local', name);
+      const lo = entries(loView, 'local', name);
       // identical documents first
-      const unmatched = [];
+      const unmatched: KeyEntry[] = [];
       for (const entry of up) {
         const index = lo.findIndex((other) => other.key === entry.key);
-        if (index < 0) {
+        const other = lo[index];
+        if (!other) {
           unmatched.push(entry);
           continue;
         }
         const label = next();
         labels.upstream.set(entry.id, label);
-        labels.local.set(lo[index].id, label);
+        labels.local.set(other.id, label);
         lo.splice(index, 1);
       }
       up = unmatched;
       // then differing documents in canonical order
       for (let i = 0; i < Math.max(up.length, lo.length); i++) {
         const label = next();
-        if (up[i]) labels.upstream.set(up[i].id, label);
-        if (lo[i]) labels.local.set(lo[i].id, label);
-        if (up[i] && i > 0 && up[i - 1]?.key === up[i].key)
+        const upEntry = up[i];
+        const loEntry = lo[i];
+        if (upEntry) labels.upstream.set(upEntry.id, label);
+        if (loEntry) labels.local.set(loEntry.id, label);
+        if (upEntry && i > 0 && up[i - 1]?.key === upEntry.key)
           ambiguous.push(`${name}: identical new documents`);
       }
     }
   }
 
-  function apply(view, side) {
+  function apply(view: View, side: Side): View {
     const map = labels[side];
-    const collections = {};
+    const collections: Record<string, Document[]> = {};
     for (const [name, docs] of Object.entries(view.collections)) {
-      collections[name] = docs.map((doc) => replaceIds(doc, map));
+      collections[name] = docs.map((doc) => replaceIds(doc, map) as Document);
     }
     return {
       ...view,
       collections,
       env: {
         ...view.env,
-        memory: replaceIds(view.env.memory, map),
+        memory: replaceIds(view.env.memory, map) as Record<string, unknown>,
         activeRooms: [...new Set(view.env.activeRooms)].sort(),
       },
     };
@@ -233,23 +263,32 @@ export function createLabeler(known) {
   };
 }
 
-function diffValues(path, a, b, out, limit) {
+function diffValues(
+  path: string,
+  a: unknown,
+  b: unknown,
+  out: ValueDifference[],
+  limit: number,
+): void {
   if (out.length >= limit) return;
-  if (json(a) === json(b)) return;
+  // Most steps leave most documents untouched: avoid sorting/stringifying equal JSON trees.
+  if (isDeepStrictEqual(a, b) || json(a) === json(b)) return;
   const objects =
     a &&
     b &&
     typeof a === 'object' &&
     typeof b === 'object' &&
     Array.isArray(a) === Array.isArray(b);
-  if (objects && !Array.isArray(a)) {
+  if (objects && isRecord(a) && isRecord(b)) {
     for (const key of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort()) {
       diffValues(`${path}.${key}`, a[key], b[key], out, limit);
     }
     return;
   }
-  if (objects && Array.isArray(a) && a.length === b.length) {
-    a.forEach((item, index) => diffValues(`${path}[${String(index)}]`, item, b[index], out, limit));
+  if (objects && Array.isArray(a) && Array.isArray(b) && a.length === b.length) {
+    (a as unknown[]).forEach((item, index) => {
+      diffValues(`${path}[${String(index)}]`, item, b[index], out, limit);
+    });
     return;
   }
   out.push({
@@ -259,17 +298,17 @@ function diffValues(path, a, b, out, limit) {
   });
 }
 
-function keyOf(name, doc) {
+function keyOf(name: string, doc: Document) {
   return String(doc[KEY_FIELD[name] ?? '_id']);
 }
 
-function splitHost(doc) {
+function splitHost(doc: Document | undefined): [Document | undefined, Document] {
   if (!doc) return [doc, {}];
   const game = { ...doc };
-  const host = {};
+  const host: Document = {};
   for (const field of HOST_USER_FIELDS) {
     if (field in game) host[field] = game[field];
-    delete game[field];
+    Reflect.deleteProperty(game, field);
   }
   return [game, host];
 }
@@ -280,12 +319,18 @@ function splitHost(doc) {
  * scenario). `initialView` is the upstream starting state, used for collections the local game has
  * no representation of (any change there is a difference).
  */
-export function compareStates(upstreamView, localView, labeler, initialView, { limit = 200 } = {}) {
+export function compareStates(
+  upstreamView: View,
+  localView: View,
+  labeler: Labeler,
+  initialView: View,
+  { limit = 200 } = {},
+) {
   const relabeled = labeler.relabel(upstreamView, localView);
   const up = { view: relabeled.up };
   const lo = { view: relabeled.lo };
-  const diffs = [];
-  const hostFields = [];
+  const diffs: Difference[] = [];
+  const hostFields: Difference[] = [];
   const localNames = new Set(Object.keys(lo.view.collections));
   for (const name of Object.keys(upstreamView.collections)
     .filter((n) => !localNames.has(n))
@@ -311,16 +356,16 @@ export function compareStates(upstreamView, localView, labeler, initialView, { l
         const [gb, hb] = splitHost(b);
         a = ga;
         b = gb;
-        const hostDiff = [];
+        const hostDiff: ValueDifference[] = [];
         diffValues('', ha, hb, hostDiff, limit);
         for (const entry of hostDiff) hostFields.push({ collection: name, key, ...entry });
       }
-      const out = [];
+      const out: ValueDifference[] = [];
       diffValues('', a, b, out, limit - diffs.length);
       for (const entry of out) diffs.push({ collection: name, key, ...entry });
     }
   }
-  const envOut = [];
+  const envOut: ValueDifference[] = [];
   diffValues('env', up.view.env, lo.view.env, envOut, limit);
   for (const entry of envOut) diffs.push({ collection: 'env', key: '', ...entry });
   for (const [key, value] of Object.entries(upstreamView.unmappedEnv ?? {})) {

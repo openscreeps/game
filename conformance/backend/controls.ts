@@ -9,11 +9,28 @@
  * id values are normalized by the comparison and must not shift the backend's draws.
  */
 
+import type { WorldRandom as Random } from '../../src/world/random.ts';
+import { createWorldState } from '@openscreeps/engine';
+
+export interface Controls {
+  RealDate: DateConstructor;
+  seed(state: number): void;
+  readonly rngState: number;
+  readonly draws: number;
+  setNow(ms: number): void;
+  readonly now: number;
+  inStorage<T, A extends unknown[]>(
+    fn: (this: T, ...args: A) => unknown,
+    self: T,
+    args: A,
+  ): unknown;
+}
+
 const RealDate = globalThis.Date;
 
-export function installControls(WorldRandom) {
-  const backend = { rngState: 0 };
-  const storage = { rngState: 0x5eed5eed };
+export function installControls(WorldRandom: typeof Random): Controls {
+  const backend = createWorldState({ rngState: 0 });
+  const storage = createWorldState({ rngState: 0x5eed5eed });
   const backendRandom = new WorldRandom(backend);
   const storageRandom = new WorldRandom(storage);
   let inStorage = 0;
@@ -27,20 +44,26 @@ export function installControls(WorldRandom) {
   };
 
   class ControlledDate extends RealDate {
-    constructor(...args) {
+    constructor(
+      ...args:
+        | []
+        | [string | number | Date]
+        | [number, number, number?, number?, number?, number?, number?]
+    ) {
       if (args.length === 0) super(clock);
+      else if (args.length === 1) super(args[0]);
       else super(...args);
     }
-    static now() {
+    static override now() {
       return clock;
     }
   }
-  globalThis.Date = ControlledDate;
+  globalThis.Date = ControlledDate as DateConstructor;
 
   return {
     RealDate,
     /** Seed the backend stream (the local side seeds `world.rngState` with the same value). */
-    seed(state) {
+    seed(state: number) {
       backend.rngState = state >>> 0;
       draws = 0;
     },
@@ -50,7 +73,7 @@ export function installControls(WorldRandom) {
     get draws() {
       return draws;
     },
-    setNow(ms) {
+    setNow(ms: number) {
       clock = ms;
     },
     get now() {

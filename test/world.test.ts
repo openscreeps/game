@@ -193,29 +193,6 @@ void describe('world generation', () => {
     assert.equal(seen.size, open);
   });
 
-  void it('links sector centers with portals landing next to the paired cluster', () => {
-    const world = createWorld({ size: 21, seed: 3, shardName: 'shard0' });
-    const centers = ['W5N5', 'W15N5', 'W5N15', 'W15N15'];
-    for (const center of centers) {
-      const portals = objectsIn(world, center, 'portal');
-      assert.equal(portals.length, 8, center);
-      assert.equal(objectsIn(world, center, 'constructedWall').length, 1);
-      const target = portals[0]?.destination?.room as string;
-      assert.ok(centers.includes(target) && target !== center);
-      for (const portal of portals) {
-        const destination = portal.destination;
-        assert.ok(destination);
-        assert.equal(destination.room, target);
-        assert.ok(!isWall(world.terrain[target] as string, destination.x, destination.y));
-        assert.equal(
-          objectsIn(world, target).filter((o) => o.x === destination.x && o.y === destination.y)
-            .length,
-          0,
-        );
-      }
-    }
-  });
-
   void it('generates single rooms matching neighbors and removes them', () => {
     const world = structuredClone(base);
     assert.throws(() => {

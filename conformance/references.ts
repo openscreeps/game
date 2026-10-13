@@ -4,10 +4,19 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const pins = JSON.parse(readFileSync(resolve(root, 'reference-versions.json'), 'utf8'));
+export type ReferenceName = 'backend' | 'common' | 'storage';
+interface ReferencePin {
+  repository: string;
+  commit: string;
+  license: string;
+}
+const pins = JSON.parse(readFileSync(resolve(root, 'reference-versions.json'), 'utf8')) as Record<
+  ReferenceName,
+  ReferencePin
+>;
 export const referenceRoot = resolve(root, '.reference');
 
-export function verifyReferences(names) {
+export function verifyReferences(names: readonly ReferenceName[]) {
   for (const name of names) {
     const directory = resolve(referenceRoot, name);
     const revision = execFileSync('git', ['rev-parse', 'HEAD'], {
@@ -27,7 +36,7 @@ export function verifyReferences(names) {
   }
 }
 
-export function prepareReferences(names, installNames = names) {
+export function prepareReferences(names: readonly ReferenceName[], installNames = names) {
   mkdirSync(referenceRoot, { recursive: true });
   for (const name of names) {
     const directory = resolve(referenceRoot, name);
