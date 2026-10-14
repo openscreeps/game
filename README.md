@@ -50,8 +50,9 @@ the dependency pin and lockfile are required before distributing it with the gam
 The engine's `examples/simulation-benchmark.ts` measures production-sized
 simulation workloads independently of player scripts and persistence.
 
-The engine pin is `d9c5a8f50d654273fa5e5645f05afca65e6c3274`, including
-accuracy-checked reductions in world scanning and runtime-index allocations.
+The engine pin is `5187cc94cda1b5a992ec6fe77f7f35cce1bef8db`, including
+accuracy-checked reductions in world scanning and runtime-index allocations and
+stronghold defender maintenance over the index-keyed population upstream persists.
 Maintenance, tick processing and storage ordering remain enabled and unchanged.
 
 The package is currently distributed from Git, not the npm registry. Consumers

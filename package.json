@@ -33,12 +33,12 @@
   },
   "license": "ISC",
   "dependencies": {
-    "@openscreeps/engine": "github:openscreeps/engine#d9c5a8f50d654273fa5e5645f05afca65e6c3274"
+    "@openscreeps/engine": "github:openscreeps/engine#5187cc94cda1b5a992ec6fe77f7f35cce1bef8db"
   },
   "allowScripts": {
     "esbuild@0.28.2": true,
     "isolated-vm@7.0.1": true,
-    "github:openscreeps/engine#d9c5a8f50d654273fa5e5645f05afca65e6c3274": true
+    "github:openscreeps/engine#5187cc94cda1b5a992ec6fe77f7f35cce1bef8db": true
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
