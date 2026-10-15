@@ -885,7 +885,10 @@ export function createNpcTerminal(world: WorldState, roomName: string): RoomObje
 }
 
 export interface CreateWorldOptions {
-  /** Rooms per side: the world spans W(size-1)N(size-1)..W0N0 (11 = one sector, the default map). */
+  /**
+   * Rooms per side. The world is centred on the `W0`|`E0` and `N0`|`S0` lines like the
+   * screeps.com shards (see `worldBounds`): 11 spans `W5N5`..`E4S4`, 22 spans `W10N10`..`E10S10`.
+   */
   size: number;
   seed: number;
   shardName: string;
@@ -935,10 +938,30 @@ function sectorOptions(x: number, y: number, depositType: string | undefined): G
 }
 
 /**
- * Generate a complete world following the official sector layout: highway rooms on every tenth
- * row/column (power banks and deposits, NPC terminals at crossroads), a 3x3 source keeper block
- * around every sector center, portals linking sector centers, and controller rooms elsewhere.
- * Room exits match on both sides, the world border is walled and every room is reachable.
+ * Coordinates (`roomNameToXY`, the same on both axes) of the first and last room of a generated
+ * world of `size` rooms per side: `-ceil(size / 2)`..`floor(size / 2) - 1`, centred on the
+ * `W0`|`E0` (`N0`|`S0`) line like the screeps.com shards. An even size is symmetric,
+ * `W(size/2-1)`..`E(size/2-1)` (shard0's 182 rooms are `W90`..`E90`); an odd size has its extra
+ * room in the west (north), `W5`..`E4` for 11.
+ *
+ * `GET /api/game/world-size` (upstream `calcWorldSize`, see `worldSize`) measures each axis from
+ * its minimum to its maximum, the maximum starting at 0 (the `E0`/`S0` line). Every world of two or
+ * more rooms per side has rooms on both sides of that line, so it reports exactly `size`, as
+ * screeps.com does for its shards; a single room (`W0N0`) reports 2.
+ */
+export function worldBounds(size: number): { min: number; max: number } {
+  const min = -Math.ceil(size / 2);
+  return { min, max: min + size - 1 };
+}
+
+/**
+ * Generate a complete world following the official sector layout around the zero lines (see
+ * `worldBounds`): highway rooms on every tenth row/column counted from them (`W0`, `E0`, `W10`,
+ * `E10`, …; power banks and deposits, NPC terminals at crossroads), a 3x3 source keeper block
+ * around every sector center (`W5`/`E5`, `W15`/`E15`, …), portals linking the sector centers
+ * present, and controller rooms elsewhere. Sectors cut by the world border keep the rooms of the
+ * layout they lie in. Room exits match on both sides, the world border is walled and every room
+ * is reachable.
  */
 export function createWorld(options: CreateWorldOptions): WorldState {
   const { size, seed, shardName } = options;
@@ -971,8 +994,7 @@ export function createWorld(options: CreateWorldOptions): WorldState {
   };
   ensureSystemUser(world);
 
-  const min = -size;
-  const max = -1;
+  const { min, max } = worldBounds(size);
   // exits of every internal edge, decided up front so both rooms agree and no edge is closed
   const horizontal = new Map<string, number[]>();
   const vertical = new Map<string, number[]>();

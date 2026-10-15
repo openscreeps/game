@@ -19,8 +19,9 @@ const PROBE = `module.exports.loop = () => {
 /** A world with private host data stored next to the game fields, as servers do. */
 type HostState = GameState & { secrets: Record<string, string> };
 
-// Generation is covered by world.test.ts; each session gets an independent raw state clone.
-const generatedState = createGameState({ size: 2, seed: 5, shardName: 'shard0' });
+// Generation is covered by world.test.ts; each session gets an independent raw state clone. A
+// centred world of 3 rooms per side has one controller room, W1N1 (the rest are highways).
+const generatedState = createGameState({ size: 3, seed: 5, shardName: 'shard0' });
 
 const sessions: Array<GameSession<HostState>> = [];
 after(() => {

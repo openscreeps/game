@@ -53,7 +53,12 @@ export function roomStatus(world: WorldState, room?: string): Record<string, unk
   return info ? roomStatusOf(info) : {};
 }
 
-/** Upstream `calcWorldSize` over the room documents (whose maxima start at 0). */
+/**
+ * Upstream `calcWorldSize` over the room documents, whose maxima start at 0 (the `E0`/`S0` line):
+ * a generated world of two or more rooms per side, centred on that line (`worldBounds`), reports
+ * its size; a world lying only north-west of it (the upstream default world, older `OpenScreeps`
+ * worlds, a single-room `W0N0` world) one more.
+ */
 export function worldSize(world: WorldState): number {
   let minX = Infinity;
   let minY = Infinity;

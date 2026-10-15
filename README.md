@@ -106,6 +106,25 @@ player lifecycle operations. Exported functions such as `placeSpawn`,
 accept game context/state, a user ID and plain domain inputs—not HTTP requests.
 Domain failures throw `GameError`; hosts decide how to present them.
 
+## World layout
+
+`createWorld`/`createGameState` generate `size` × `size` rooms centred on the
+`W0`|`E0` and `N0`|`S0` lines, like the screeps.com shards: x and y run from
+`-ceil(size / 2)` to `floor(size / 2) - 1` (`worldBounds`, `W0` = -1, `E0` = 0).
+An even size is symmetric (22: `W10N10`..`E10S10`); an odd size has its extra
+row and column in the north and west (21: `W10N10`..`E9S9`; 11: `W5N5`..`E4S4`;
+3, the example above: `W1N1`..`E0S0`). Highways lie on every tenth row and column
+counted from the zero lines, so the four central crossroads `W0N0`, `E0N0`,
+`W0S0` and `E0S0` always exist, and sector centers sit at `W5`/`E5`, `W15`/`E15`, …
+Sectors cut by the world border keep the rooms the layout gives their coordinates.
+
+`worldSize` (`GET /api/game/world-size`) follows upstream `calcWorldSize`, whose
+maxima start at 0: centred worlds of two or more rooms per side report exactly
+`size`, as screeps.com reports for its shards; a single-room world (`W0N0`) reports 2.
+Generation stays deterministic per seed, but worlds now differ from those of
+earlier versions, which spanned `W(size-1)N(size-1)`..`W0N0` (and reported
+`size + 1`). Existing snapshots keep their rooms.
+
 ## State, concurrency and snapshots
 
 The constructor adopts `state` without copying it. Session methods reject calls

@@ -9,6 +9,7 @@ export {
   generateRoom,
   openRoom,
   removeRoom,
+  worldBounds,
 } from './generate.ts';
 export type {
   CreateWorldOptions,

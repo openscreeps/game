@@ -15,6 +15,8 @@ import {
   runMaintenance,
   spawnBot,
   spawnStronghold,
+  worldBounds,
+  worldSize,
   type GameContext,
   type GameState,
   type MaintenanceHooks,
@@ -64,46 +66,124 @@ function contextOf(state: GameState): GameContext {
 const isWall = (terrain: string, x: number, y: number): boolean =>
   (Number(terrain.charAt(y * 50 + x)) & 1) > 0;
 
+/** Every room name of the rectangle from the north-west room `from` to the south-east room `to`. */
+function roomsBetween(from: string, to: string): string[] {
+  const [minX, minY] = roomNameToXY(from);
+  const [maxX, maxY] = roomNameToXY(to);
+  const names: string[] = [];
+  for (let y = minY; y <= maxY; y++) {
+    for (let x = minX; x <= maxX; x++) names.push(roomNameFromXY(x, y));
+  }
+  return names.sort();
+}
+
+/** The distance of a room name part (`W12`, `S3`) from the west/north sector highway. */
+const offset = (part: string): number => Number(part.slice(1)) % 10;
+
+function roomParts(name: string): [string, string] {
+  const match = /^([WE]\d+)([NS]\d+)$/.exec(name);
+  assert.ok(match, name);
+  return [match[1] as string, match[2] as string];
+}
+
 void describe('world generation', () => {
   void it('is deterministic per seed', () => {
     const again = createWorld({ size: 11, seed: 7, shardName: 'shard0' });
     assert.deepEqual(again.terrain, base.terrain);
     assert.deepEqual(again.roomObjects, base.roomObjects);
+    assert.deepEqual(again.rooms, base.rooms);
     const other = createWorld({ size: 3, seed: 8, shardName: 'shard0' });
     assert.notDeepEqual(other.terrain.W1N1, base.terrain.W1N1);
   });
 
-  void it('lays out the official sector: highways, keeper rooms, center, controllers, NPC terminals', () => {
+  void it('centres worlds on the zero lines and reports their size like screeps.com', () => {
+    const layouts: Array<[number, string, string, number]> = [
+      // a lone W0N0: `calcWorldSize` starts its maxima at 0, counting the E0/S0 line
+      [1, 'W0N0', 'W0N0', 2],
+      [2, 'W0N0', 'E0S0', 2],
+      [3, 'W1N1', 'E0S0', 3],
+      [4, 'W1N1', 'E1S1', 4],
+      [11, 'W5N5', 'E4S4', 11],
+    ];
+    for (const [size, from, to, reported] of layouts) {
+      const world = size === 11 ? base : createWorld({ size, seed: 1, shardName: 'shard0' });
+      assert.deepEqual(Object.keys(world.rooms).sort(), roomsBetween(from, to), String(size));
+      assert.deepEqual(Object.keys(world.terrain).sort(), roomsBetween(from, to), String(size));
+      assert.equal(worldSize(world), reported, String(size));
+    }
+    // Bounds of larger worlds (the 21-room default is generated in world-portals.test.ts).
+    const corners = (size: number): [string, string] => {
+      const { min, max } = worldBounds(size);
+      return [roomNameFromXY(min, min), roomNameFromXY(max, max)];
+    };
+    assert.deepEqual(corners(21), ['W10N10', 'E9S9']);
+    assert.deepEqual(corners(22), ['W10N10', 'E10S10']);
+    assert.deepEqual(corners(62), ['W30N30', 'E30S30']);
+    assert.deepEqual(corners(182), ['W90N90', 'E90S90']);
+    assert.deepEqual(corners(199), ['W99N99', 'E98S98']);
+    assert.throws(() => createWorld({ size: 0, seed: 1, shardName: 'shard0' }), /Invalid world/);
+  });
+
+  void it('lays out sectors around the zero lines: highways, keeper rooms, center, controllers, NPC terminals', () => {
     assert.equal(Object.keys(base.rooms).length, 121);
     assert.equal(base.users['2']?.username, 'Invader');
     assert.equal(base.users['3']?.username, 'Source Keeper');
     assert.ok(Object.values(base.users).some((u) => u.username === C.SYSTEM_USERNAME));
 
+    const highways: string[] = [];
+    const crossroads: string[] = [];
+    const keepers: string[] = [];
+    const controllers: string[] = [];
     for (const name of Object.keys(base.rooms)) {
-      const [x, y] = roomNameToXY(name);
-      const highway = (x + 1) % 10 === 0 || (y + 1) % 10 === 0;
+      const [h, v] = roomParts(name);
+      const highway = offset(h) === 0 || offset(v) === 0;
       const room = base.rooms[name];
       assert.ok(room);
       assert.equal(room.status, 'normal');
       assert.equal(base.terrain[name]?.length, 2500);
       if (highway) {
+        highways.push(name);
         assert.equal(room.bus, true, name);
         assert.ok(room.depositType, name);
-        const crossroad = (x + 1) % 10 === 0 && (y + 1) % 10 === 0;
+        const crossroad = offset(h) === 0 && offset(v) === 0;
         const objects = objectsIn(base, name);
         assert.equal(objects.length, crossroad ? 1 : 0, name);
         if (crossroad) {
+          crossroads.push(name);
           assert.equal(objects[0]?.type, 'terminal');
           assert.equal(objects[0].user, undefined);
         }
+      } else if ([4, 5, 6].includes(offset(h)) && [4, 5, 6].includes(offset(v))) {
+        if (name !== 'W5N5') keepers.push(name);
+      } else {
+        controllers.push(name);
+        assert.equal(objectsIn(base, name, 'controller').length, 1, name);
       }
     }
+    // W0, E0, N0 and S0 cross at the centre of the world.
+    assert.equal(highways.length, 4 * 11 - 4);
+    assert.deepEqual(crossroads.sort(), ['E0N0', 'E0S0', 'W0N0', 'W0S0']);
+    // Rooms of a highway segment between crossroads share a deposit type.
+    for (const segment of [
+      ['W0N1', 'W0N3', 'W0N5'],
+      ['E1S0', 'E2S0', 'E4S0'],
+      ['W5N0', 'W1N0'],
+    ]) {
+      assert.equal(new Set(segment.map((name) => base.rooms[name]?.depositType)).size, 1);
+    }
+    assert.equal(controllers.length, 121 - 40 - 9);
 
+    // W5N5 is the only sector center inside the world; the keeper rooms of the W5N5, E5N5, W5S5
+    // and E5S5 sectors reach in from the corners and edges.
     assert.equal(objectsIn(base, 'W5N5', 'controller').length, 0);
     assert.equal(objectsIn(base, 'W5N5', 'source').length, 3);
     assert.equal(objectsIn(base, 'W5N5', 'keeperLair').length, 0);
     assert.equal(objectsIn(base, 'W5N5', 'extractor').length, 1);
-    for (const name of ['W4N4', 'W4N5', 'W4N6', 'W5N4', 'W5N6', 'W6N4', 'W6N5', 'W6N6']) {
+    assert.deepEqual(
+      keepers.sort(),
+      ['E4N4', 'E4N5', 'E4S4', 'W4N4', 'W4N5', 'W4S4', 'W5N4', 'W5S4'].sort(),
+    );
+    for (const name of keepers) {
       assert.equal(base.rooms[name]?.sourceKeepers, true, name);
       assert.equal(objectsIn(base, name, 'controller').length, 0, name);
       assert.equal(objectsIn(base, name, 'source').length, 3, name);
@@ -122,8 +202,8 @@ void describe('world generation', () => {
         );
       }
     }
-    for (const name of ['W2N2', 'W8N3', 'W3N8']) {
-      assert.equal(objectsIn(base, name, 'controller').length, 1, name);
+    for (const name of ['W2N2', 'E2S2', 'W3S1', 'E1N3']) {
+      assert.ok(controllers.includes(name), name);
       const sources = objectsIn(base, name, 'source').length;
       assert.ok(sources >= 1 && sources <= 2, name);
       assert.equal(objectsIn(base, name, 'mineral').length, 1, name);
@@ -202,38 +282,38 @@ void describe('world generation', () => {
       generateRoom(world, 'W2N2');
     }, /already exists/);
     assert.throws(() => {
-      generateRoom(world, 'W11N5', { exits: { right: [10, 11] } });
-    }, /Exits in room W10N5 don't match/);
-    generateRoom(world, 'W11N5');
+      generateRoom(world, 'W6N2', { exits: { right: [10, 11] } });
+    }, /Exits in room W5N2 don't match/);
+    generateRoom(world, 'W6N2');
     assert.deepEqual(
-      exitsOf(world.terrain.W11N5 as string, 'right'),
-      exitsOf(world.terrain.W10N5 as string, 'left'),
+      exitsOf(world.terrain.W6N2 as string, 'right'),
+      exitsOf(world.terrain.W5N2 as string, 'left'),
     );
-    assert.equal(objectsIn(world, 'W11N5', 'controller').length, 1);
+    assert.equal(objectsIn(world, 'W6N2', 'controller').length, 1);
 
-    generateRoom(world, 'E3S3', {
+    generateRoom(world, 'E8S8', {
       sources: 2,
       mineral: 'X',
       controller: true,
       terrainType: 2,
       swampType: 3,
     });
-    assert.equal(objectsIn(world, 'E3S3', 'source').length, 2);
-    assert.equal(objectsIn(world, 'E3S3', 'mineral')[0]?.mineralType, 'X');
+    assert.equal(objectsIn(world, 'E8S8', 'source').length, 2);
+    assert.equal(objectsIn(world, 'E8S8', 'mineral')[0]?.mineralType, 'X');
     // like upstream, a generated room waits for `roomsForceUpdate` to be scheduled
-    assert.ok(!world.activeRooms.includes('E3S3'));
+    assert.ok(!world.activeRooms.includes('E8S8'));
 
-    removeRoom(world, 'E3S3');
-    assert.equal(world.rooms.E3S3, undefined);
-    assert.equal(world.terrain.E3S3, undefined);
-    assert.equal(objectsIn(world, 'E3S3').length, 0);
+    removeRoom(world, 'E8S8');
+    assert.equal(world.rooms.E8S8, undefined);
+    assert.equal(world.terrain.E8S8, undefined);
+    assert.equal(objectsIn(world, 'E8S8').length, 0);
     assert.throws(() => {
-      removeRoom(world, 'E3S3');
+      removeRoom(world, 'E8S8');
     }, /not found/);
 
-    createPortalPair(world, 'W2N2', 'W8N8', { decayTime: 100 });
+    createPortalPair(world, 'W2N2', 'E2S2', { decayTime: 100 });
     assert.equal(objectsIn(world, 'W2N2', 'portal').length, 8);
-    assert.equal(objectsIn(world, 'W8N8', 'portal')[0]?.destination?.room, 'W2N2');
+    assert.equal(objectsIn(world, 'E2S2', 'portal')[0]?.destination?.room, 'W2N2');
   });
 });
 
@@ -277,20 +357,20 @@ void describe('maintenance jobs', () => {
     const world = state.world;
     world.gameTime = 1000;
     runJob(state, 'genPowerBanks', NOW);
-    const room = world.rooms.W10N5;
+    const room = world.rooms.W0N5;
     assert.ok(room?.powerBankTime);
     assert.ok(room.powerBankTime >= 1000 + 37500 && room.powerBankTime <= 1000 + 62500);
     room.powerBankTime = 1000;
     world.activeRooms = [];
     runJob(state, 'genPowerBanks', NOW);
-    const [bank] = objectsIn(world, 'W10N5', 'powerBank');
+    const [bank] = objectsIn(world, 'W0N5', 'powerBank');
     assert.ok(bank);
     assert.equal(bank.hits, C.POWER_BANK_HITS);
     assert.equal(bank.decayTime, 1000 + C.POWER_BANK_DECAY);
     const power = bank.store?.power ?? 0;
     assert.ok(power >= C.POWER_BANK_CAPACITY_MIN && power < 2 * C.POWER_BANK_CAPACITY_MAX);
-    assert.ok(isWall(world.terrain.W10N5 as string, bank.x, bank.y));
-    assert.deepEqual(world.activeRooms, ['W10N5']);
+    assert.ok(isWall(world.terrain.W0N5 as string, bank.x, bank.y));
+    assert.deepEqual(world.activeRooms, ['W0N5']);
   });
 
   void it('replenishes NPC terminal orders once per period', () => {
@@ -298,7 +378,7 @@ void describe('maintenance jobs', () => {
     runJob(state, 'recreateNpcOrders', NOW);
     const orders = Object.values(state.world.marketOrders);
     const rooms = new Set(orders.map((o) => o.roomName));
-    assert.deepEqual([...rooms].sort(), ['W0N0', 'W0N10', 'W10N0', 'W10N10']);
+    assert.deepEqual([...rooms].sort(), ['E0N0', 'E0S0', 'W0N0', 'W0S0']);
     for (const order of orders) {
       assert.equal(order.user, undefined);
       assert.equal(order.active, true);

@@ -32,8 +32,9 @@ function changedConstants(): Constants {
 }
 
 function botWorld(constants?: Constants) {
+  // a centred world of 3 rooms per side: W1N1 is its controller room
   const state = createGameState({
-    size: 2,
+    size: 3,
     seed: 5,
     shardName: 'shard0',
     ...(constants ? { constants } : {}),
