@@ -118,6 +118,16 @@ counted from the zero lines, so the four central crossroads `W0N0`, `E0N0`,
 `W0S0` and `E0S0` always exist, and sector centers sit at `W5`/`E5`, `W15`/`E15`, …
 Sectors cut by the world border keep the rooms the layout gives their coordinates.
 
+Portals follow screeps.com's layout: `createPortalPair` (the server's `portal-create`
+admin action) puts a cluster of eight portals around an indestructible wall in each
+room, and every portal leads to the matching portal tile of the other cluster,
+which leads exactly back. As in the engine (and on screeps.com), a creep arriving
+on the partner portal is sent back the next tick unless it steps off. Generated
+worlds shuffle their sector centers deterministically per seed and link them in
+two-way pairs; with an odd count one center has no portals, as some screeps.com
+centers have none. Generated portals are permanent (no `unstableDate`): unlike
+screeps.com, OpenScreeps does not regenerate portals, so they never decay.
+
 `worldSize` (`GET /api/game/world-size`) follows upstream `calcWorldSize`, whose
 maxima start at 0: centred worlds of two or more rooms per side report exactly
 `size`, as screeps.com reports for its shards; a single-room world (`W0N0`) reports 2.

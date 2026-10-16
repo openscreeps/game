@@ -804,30 +804,25 @@ export interface PortalOptions {
   decayTime?: number;
 }
 
-/**
- * Create a one-way portal cluster in `fromRoom` leading to `toRoom`: eight portals around an
- * indestructible wall, each leading to the tile two steps out from the matching side of the
- * destination cluster centered at `to`.
- */
-export function createPortal(
+/** Eight portals around an indestructible wall at `at`, each leading to the same tile of `to`. */
+function createPortalCluster(
   world: WorldState,
-  fromRoom: string,
+  at: { room: string; x: number; y: number },
   to: { room: string; x: number; y: number },
-  at: { x: number; y: number },
-  options: PortalOptions = {},
+  options: PortalOptions,
 ): void {
   for (let dx = -1; dx <= 1; dx++) {
     for (let dy = -1; dy <= 1; dy++) {
       if (!dx && !dy) {
-        insertObject(world, { type: 'constructedWall', room: fromRoom, x: at.x, y: at.y });
+        insertObject(world, { type: 'constructedWall', room: at.room, x: at.x, y: at.y });
         continue;
       }
       const portal: Omit<RoomObject, '_id'> = {
         type: 'portal',
-        room: fromRoom,
+        room: at.room,
         x: at.x + dx,
         y: at.y + dy,
-        destination: { room: to.room, x: to.x + 2 * dx, y: to.y + 2 * dy },
+        destination: { room: to.room, x: to.x + dx, y: to.y + dy },
       };
       if (options.unstableDate !== undefined) {
         portal.unstableDate = options.unstableDate;
@@ -838,11 +833,14 @@ export function createPortal(
       insertObject(world, portal);
     }
   }
-  activateRoom(world, fromRoom);
+  activateRoom(world, at.room);
 }
 
 /**
- * Link two rooms with a pair of portal clusters (each one-way, landing beside the other cluster).
+ * Link two rooms with a two-way portal pair, like screeps.com: a cluster of eight portals around
+ * an indestructible wall in each room, every portal leading to the matching portal tile of the
+ * other cluster, which leads exactly back. Both clusters share `options`. As in the engine, a
+ * creep arriving on the partner portal is sent back next tick unless it steps off.
  * Throws when either room has no free plain 5x5 area.
  */
 export function createPortalPair(
@@ -860,8 +858,8 @@ export function createPortalPair(
   if (!a || !b) {
     throw new Error('No free area for a portal');
   }
-  createPortal(world, roomA, { room: roomB, ...b }, a, options);
-  createPortal(world, roomB, { room: roomA, ...a }, b, options);
+  createPortalCluster(world, { room: roomA, ...a }, { room: roomB, ...b }, options);
+  createPortalCluster(world, { room: roomB, ...b }, { room: roomA, ...a }, options);
 }
 
 /** Unowned, indestructible terminal used by NPC market orders. */
@@ -958,10 +956,12 @@ export function worldBounds(size: number): { min: number; max: number } {
  * Generate a complete world following the official sector layout around the zero lines (see
  * `worldBounds`): highway rooms on every tenth row/column counted from them (`W0`, `E0`, `W10`,
  * `E10`, …; power banks and deposits, NPC terminals at crossroads), a 3x3 source keeper block
- * around every sector center (`W5`/`E5`, `W15`/`E15`, …), portals linking the sector centers
- * present, and controller rooms elsewhere. Sectors cut by the world border keep the rooms of the
- * layout they lie in. Room exits match on both sides, the world border is walled and every room
- * is reachable.
+ * around every sector center (`W5`/`E5`, `W15`/`E15`, …), and controller rooms elsewhere. The
+ * sector centers present are shuffled and linked in two-way pairs (`createPortalPair`), like
+ * screeps.com's; with an odd count one center has no portals. The portals are permanent (no
+ * `unstableDate`), since nothing regenerates them. Sectors cut by the world border keep the rooms
+ * of the layout they lie in. Room exits match on both sides, the world border is walled and every
+ * room is reachable.
  */
 export function createWorld(options: CreateWorldOptions): WorldState {
   const { size, seed, shardName } = options;
@@ -1063,22 +1063,20 @@ export function createWorld(options: CreateWorldOptions): WorldState {
   for (const roomName of crossroads) {
     createNpcTerminal(world, roomName);
   }
-  if (centers.length > 1) {
-    const order = random.shuffle(centers);
-    const spots = new Map(
-      order.map((room) => [room, findPortalSpot(world, random, room) as { x: number; y: number }]),
-    );
-    order.forEach((room, i) => {
-      const target = order[(i + 1) % order.length] as string;
-      createPortal(
-        world,
-        room,
-        { room: target, ...(spots.get(target) as { x: number; y: number }) },
-        spots.get(room) as { x: number; y: number },
-      );
-    });
-  }
+  linkSectorCenters(world, centers);
   return world;
+}
+
+/**
+ * Shuffle `centers` (deterministically, from the world's random stream) and link them in
+ * permanent two-way portal pairs; with an odd count the center left over has no portals.
+ */
+export function linkSectorCenters(world: WorldState, centers: readonly string[]): void {
+  if (centers.length < 2) return;
+  const order = new WorldRandom(world).shuffle(centers);
+  for (let i = 0; i + 1 < order.length; i += 2) {
+    createPortalPair(world, order[i] as string, order[i + 1] as string);
+  }
 }
 
 /** The `Screeps` system user owning ruins of respawned players (created if absent). */

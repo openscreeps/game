@@ -1,7 +1,6 @@
 export {
   closeRoom,
   createNpcTerminal,
-  createPortal,
   createPortalPair,
   createWorld,
   ensureSystemUser,

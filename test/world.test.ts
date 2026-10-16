@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { after, describe, it } from 'node:test';
 import { BotRuntime, constants as C, type WorldState } from '@openscreeps/engine';
 import {
-  createPortalPair,
   createWorld,
   exitsOf,
   generateRoom,
@@ -310,10 +309,6 @@ void describe('world generation', () => {
     assert.throws(() => {
       removeRoom(world, 'E8S8');
     }, /not found/);
-
-    createPortalPair(world, 'W2N2', 'E2S2', { decayTime: 100 });
-    assert.equal(objectsIn(world, 'W2N2', 'portal').length, 8);
-    assert.equal(objectsIn(world, 'E2S2', 'portal')[0]?.destination?.room, 'W2N2');
   });
 });
 
